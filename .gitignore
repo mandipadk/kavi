@@ -1,0 +1,8 @@
+node_modules
+.DS_Store
+.kavi/state
+.kavi/runtime
+dist
+docs/author-readme.md
+.next
+.vercel

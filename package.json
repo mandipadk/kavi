@@ -1,0 +1,56 @@
+{
+  "name": "@mandipadk7/kavi",
+  "version": "1.5.1",
+  "description": "Managed Codex + Claude collaboration TUI",
+  "type": "module",
+  "preferGlobal": true,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mandipadk/kavi.git"
+  },
+  "homepage": "https://www.npmjs.com/package/@mandipadk7/kavi",
+  "bugs": {
+    "url": "https://github.com/mandipadk/kavi/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "bin": "bin/kavi.js",
+  "files": [
+    "bin",
+    "dist",
+    "README.md",
+    "package.json"
+  ],
+  "scripts": {
+    "build": "node ./scripts/build.mjs",
+    "dev": "node ./bin/kavi.js",
+    "publish": "node ./scripts/publish.mjs",
+    "doctor": "node ./bin/kavi.js doctor",
+    "init": "node ./bin/kavi.js init",
+    "start": "node ./bin/kavi.js start",
+    "open": "node ./bin/kavi.js open",
+    "resume": "node ./bin/kavi.js resume",
+    "status": "node ./bin/kavi.js status",
+    "paths": "node ./bin/kavi.js paths",
+    "task": "node ./bin/kavi.js task",
+    "tasks": "node ./bin/kavi.js tasks",
+    "task-output": "node ./bin/kavi.js task-output",
+    "decisions": "node ./bin/kavi.js decisions",
+    "claims": "node ./bin/kavi.js claims",
+    "approvals": "node ./bin/kavi.js approvals",
+    "approve": "node ./bin/kavi.js approve",
+    "deny": "node ./bin/kavi.js deny",
+    "events": "node ./bin/kavi.js events",
+    "stop": "node ./bin/kavi.js stop",
+    "land": "node ./bin/kavi.js land",
+    "test": "node --experimental-strip-types --test \"src/**/*.test.ts\"",
+    "release:check": "npm run build && npm test && npm pack --dry-run --cache /tmp/kavi-npm-cache",
+    "publish:beta": "node ./scripts/publish.mjs --tag beta",
+    "publish:latest": "node ./scripts/publish.mjs --tag latest",
+    "prepublishOnly": "npm run release:check"
+  },
+  "engines": {
+    "node": ">=25.0.0"
+  }
+}
