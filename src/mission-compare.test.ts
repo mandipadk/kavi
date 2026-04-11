@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { compareMissionFamily, compareMissions } from "./mission-compare.ts";
+import { arenaSortValue, compareMissionFamily, compareMissions } from "./mission-compare.ts";
 import type { KaviSnapshot, Mission, TaskArtifact, TaskSpec } from "./types.ts";
 
 function task(
@@ -412,4 +412,167 @@ test("compareMissionFamily ranks shadow alternatives against the focused mission
   assert.equal(family.length, 2);
   assert.equal(family[0]?.rightMission.id, "mission-shadow-better");
   assert.equal(family[0]?.preferredMissionId, "mission-shadow-better");
+});
+
+test("compareMissionFamily can rank shadow alternatives by lower risk", () => {
+  const focusMission: Mission = {
+    id: "mission-focus",
+    title: "Focus",
+    prompt: "Focus",
+    goal: null,
+    mode: "guided_autopilot",
+    status: "running",
+    summary: "Focus mission.",
+    planningTaskId: null,
+    planId: null,
+    rootTaskId: "focus-codex",
+    activeTaskIds: [],
+    autopilotEnabled: true,
+    acceptance: {
+      id: "accept-focus",
+      summary: "Focus acceptance",
+      criteria: [],
+      checks: [],
+      status: "pending",
+      createdAt: "2026-04-08T00:00:00.000Z",
+      updatedAt: "2026-04-08T00:00:00.000Z"
+    },
+    checkpoints: [],
+    brainEntryIds: [],
+    createdAt: "2026-04-08T00:00:00.000Z",
+    updatedAt: "2026-04-08T00:10:00.000Z",
+    landedAt: null,
+    appliedPatternIds: [],
+    risks: [],
+    health: {
+      score: 70,
+      state: "watch",
+      reasons: [],
+      updatedAt: "2026-04-08T00:10:00.000Z"
+    }
+  };
+  const saferShadow: Mission = {
+    ...focusMission,
+    id: "mission-safer",
+    title: "Safer Shadow",
+    shadowOfMissionId: "mission-focus",
+    acceptance: { ...focusMission.acceptance, id: "accept-safer", status: "passed" },
+    risks: [],
+    health: {
+      score: 81,
+      state: "healthy",
+      reasons: [],
+      updatedAt: "2026-04-08T00:10:00.000Z"
+    }
+  };
+  const riskierShadow: Mission = {
+    ...focusMission,
+    id: "mission-riskier",
+    title: "Riskier Shadow",
+    shadowOfMissionId: "mission-focus",
+    acceptance: { ...focusMission.acceptance, id: "accept-riskier", status: "failed" },
+    risks: [
+      { id: "risk-1", title: "Schema drift", detail: "schema drift", severity: "high", mitigation: "contracts" },
+      { id: "risk-2", title: "Operational drift", detail: "ops drift", severity: "medium", mitigation: "tests" }
+    ],
+    health: {
+      score: 44,
+      state: "blocked",
+      reasons: ["failed browser verification"],
+      updatedAt: "2026-04-08T00:10:00.000Z"
+    }
+  };
+
+  const snapshot: KaviSnapshot = {
+    session: {
+      id: "session-risk-family",
+      repoRoot: "/tmp/repo",
+      baseCommit: "base",
+      createdAt: "2026-04-08T00:00:00.000Z",
+      updatedAt: "2026-04-08T00:10:00.000Z",
+      socketPath: "/tmp/repo/.kavi.sock",
+      status: "running",
+      goal: null,
+      fullAccessMode: false,
+      daemonPid: null,
+      daemonHeartbeatAt: null,
+      config: {
+        version: 1,
+        baseBranch: "main",
+        validationCommand: "",
+        messageLimit: 10,
+        routing: {
+          frontendKeywords: [],
+          backendKeywords: [],
+          codexPaths: [],
+          claudePaths: []
+        },
+        agents: {
+          codex: { role: "backend", model: "gpt-5" },
+          claude: { role: "frontend", model: "claude" }
+        }
+      },
+      runtime: {
+        nodeExecutable: "node",
+        codexExecutable: "codex",
+        claudeExecutable: "claude",
+        kaviEntryPoint: "dist/main.js"
+      },
+      worktrees: [],
+      tasks: [
+        task("focus-codex", "mission-focus", "codex", "completed", "2026-04-08T00:09:00.000Z"),
+        task("safer-claude", "mission-safer", "claude", "completed", "2026-04-08T00:09:30.000Z"),
+        task("riskier-codex", "mission-riskier", "codex", "failed", "2026-04-08T00:09:45.000Z")
+      ],
+      plans: [],
+      missions: [focusMission, saferShadow, riskierShadow],
+      receipts: [],
+      contracts: [],
+      brain: [],
+      providerCapabilities: [],
+      peerMessages: [],
+      decisions: [],
+      pathClaims: [],
+      reviewNotes: [],
+      recommendationStates: [],
+      agentStatus: {
+        codex: {
+          agent: "codex",
+          available: true,
+          transport: "codex-app-server",
+          lastRunAt: null,
+          lastExitCode: null,
+          sessionId: null,
+          summary: null
+        },
+        claude: {
+          agent: "claude",
+          available: true,
+          transport: "claude-print",
+          lastRunAt: null,
+          lastExitCode: null,
+          sessionId: null,
+          summary: null
+        }
+      }
+    },
+    approvals: [],
+    events: [],
+    worktreeDiffs: [],
+    latestLandReport: null
+  };
+
+  const family = compareMissionFamily(
+    snapshot,
+    focusMission,
+    [
+      artifact("focus-codex", "focus", "2026-04-08T00:09:00.000Z"),
+      artifact("safer-claude", "safer", "2026-04-08T00:09:30.000Z"),
+      artifact("riskier-codex", "riskier", "2026-04-08T00:09:45.000Z")
+    ],
+    "risk"
+  );
+
+  assert.equal(family[0]?.rightMission.id, "mission-safer");
+  assert.ok(arenaSortValue(family[0]!, "risk") > arenaSortValue(family[1]!, "risk"));
 });

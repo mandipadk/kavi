@@ -1,7 +1,7 @@
 import path from "node:path";
 import readline from "node:readline";
 import process from "node:process";
-import { buildBrainGraph, explainBrainEntry, queryBrainEntries, relatedBrainEntries } from "../brain.ts";
+import { buildBrainGraph, explainBrainEntry, filterBrainGraphMode, queryBrainEntries, relatedBrainEntries } from "../brain.ts";
 import {
   evaluateDaemonCompatibility,
   formatRestartRequiredMessage,
@@ -1345,26 +1345,7 @@ function filteredBrainGraph(
     includeRetired: ui.brainFilters.includeRetired,
     limit: 12
   });
-  const graphMode = ui.brainFilters.graphMode;
-  if (graphMode === "all") {
-    return graph;
-  }
-  const allowedKinds = new Set(
-    graphMode === "structural"
-      ? (["mission", "task", "evidence", "command", "scope", "category"] as const)
-      : (["supersedes", "contradicts", "tag"] as const)
-  );
-  const edges = graph.edges.filter((edge) => allowedKinds.has(edge.kind as never));
-  const visibleNodeIds = new Set<string>([selected.id]);
-  for (const edge of edges) {
-    visibleNodeIds.add(edge.from);
-    visibleNodeIds.add(edge.to);
-  }
-  return {
-    ...graph,
-    edges,
-    nodes: graph.nodes.filter((node) => visibleNodeIds.has(node.id))
-  };
+  return filterBrainGraphMode(graph, ui.brainFilters.graphMode);
 }
 
 function relatedBrainEntriesForSelection(
@@ -1391,10 +1372,26 @@ function graphNeighborEntriesForSelection(
   if (!graph) {
     return [];
   }
-  const neighbors = graph.edges
+  const missionId = selected.missionId ?? buildWorkflowResult(snapshot).activeMission?.id ?? null;
+  const neighborIds = new Set(
+    graph.edges
     .filter((edge) => edge.from === selected.id || edge.to === selected.id)
-    .map((edge) => (edge.from === selected.id ? edge.to : edge.from));
-  return neighbors
+    .map((edge) => (edge.from === selected.id ? edge.to : edge.from))
+  );
+  const pathHint = ui.brainFilters.pathHint.trim();
+  if (pathHint) {
+    for (const entry of queryBrainEntries(snapshot.session, {
+      missionId,
+      path: pathHint,
+      includeRetired: ui.brainFilters.includeRetired,
+      limit: 8
+    })) {
+      if (entry.id !== selected.id) {
+        neighborIds.add(entry.id);
+      }
+    }
+  }
+  return [...neighborIds]
     .map((entryId) => snapshot.session.brain.find((entry) => entry.id === entryId) ?? null)
     .filter((entry): entry is BrainEntry => Boolean(entry))
     .filter((entry) => ui.brainFilters.includeRetired || !entry.retiredAt);
@@ -1510,7 +1507,18 @@ function cycleSelectedBrainGraphEntry(
 }
 
 function cycleBrainFilterCategory(ui: OperatorUiState): void {
-  const order: BrainFilterState["category"][] = ["all", "fact", "decision", "procedure", "risk", "artifact"];
+  const order: BrainFilterState["category"][] = [
+    "all",
+    "fact",
+    "decision",
+    "procedure",
+    "risk",
+    "artifact",
+    "topology",
+    "contract",
+    "failure",
+    "verification"
+  ];
   const currentIndex = Math.max(0, order.indexOf(ui.brainFilters.category));
   ui.brainFilters.category = order[(currentIndex + 1) % order.length] ?? "all";
 }
@@ -1528,7 +1536,7 @@ function cycleBrainFocusArea(ui: OperatorUiState): void {
 }
 
 function cycleBrainGraphMode(ui: OperatorUiState): void {
-  const order: BrainFilterState["graphMode"][] = ["all", "structural", "knowledge"];
+  const order: BrainFilterState["graphMode"][] = ["all", "structural", "knowledge", "topology", "failure", "contract", "timeline"];
   const currentIndex = Math.max(0, order.indexOf(ui.brainFilters.graphMode));
   ui.brainFilters.graphMode = order[(currentIndex + 1) % order.length] ?? "all";
 }

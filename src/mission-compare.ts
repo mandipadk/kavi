@@ -1,6 +1,8 @@
 import { buildMissionObservability } from "./workflow.ts";
 import type { KaviSnapshot, Mission, TaskArtifact } from "./types.ts";
 
+export type MissionArenaSort = "score" | "acceptance" | "health" | "risk" | "overlap" | "cost";
+
 export interface MissionComparisonDimension {
   key:
     | "acceptance"
@@ -351,14 +353,15 @@ export function compareMissions(
 export function compareMissionFamily(
   snapshot: KaviSnapshot,
   mission: Mission,
-  artifacts: TaskArtifact[] = []
+  artifacts: TaskArtifact[] = [],
+  sortBy: MissionArenaSort = "score"
 ): MissionComparisonResult[] {
   return relatedMissionFamily(snapshot, mission)
     .filter((candidate) => candidate.id !== mission.id)
     .map((candidate) => compareMissions(snapshot, mission, candidate, artifacts))
     .sort((left, right) => {
-      const leftAdvantage = left.rightScore - left.leftScore;
-      const rightAdvantage = right.rightScore - right.leftScore;
+      const leftAdvantage = arenaSortValue(left, sortBy);
+      const rightAdvantage = arenaSortValue(right, sortBy);
       return (
         rightAdvantage - leftAdvantage ||
         right.rightScore - left.rightScore ||
@@ -366,4 +369,55 @@ export function compareMissionFamily(
         left.rightMission.title.localeCompare(right.rightMission.title)
       );
     });
+}
+
+function arenaCostScore(result: MissionComparisonResult): number {
+  const observability = result.rightObservability;
+  if (!observability) {
+    return 0;
+  }
+  return -(
+    (result.rightMission.simulation?.attentionCost ?? 0) +
+    observability.failedTasks * 3 +
+    observability.activeRepairTasks * 2 +
+    observability.retryingTasks +
+    observability.stalledTasks
+  );
+}
+
+function arenaOverlapScore(result: MissionComparisonResult): number {
+  return -(
+    result.changedPathOverlap.length * 3 +
+    result.rightOnlyPaths.length +
+    result.rightAcceptanceFailures.length * 2
+  );
+}
+
+function arenaRiskScore(result: MissionComparisonResult): number {
+  return -(
+    missionRiskLoad(result.rightMission) * 2 +
+    acceptanceFailureCount(result.rightMission) * 3 +
+    Math.max(0, -(executionRiskScore(result.rightObservability)))
+  );
+}
+
+export function arenaSortValue(
+  result: MissionComparisonResult,
+  sortBy: MissionArenaSort
+): number {
+  switch (sortBy) {
+    case "acceptance":
+      return acceptanceScore(result.rightMission);
+    case "health":
+      return result.rightMission.health?.score ?? 0;
+    case "risk":
+      return arenaRiskScore(result);
+    case "overlap":
+      return arenaOverlapScore(result);
+    case "cost":
+      return arenaCostScore(result);
+    case "score":
+    default:
+      return result.rightScore - result.leftScore;
+  }
 }

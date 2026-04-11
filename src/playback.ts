@@ -1,8 +1,70 @@
+import { buildMissionPostmortem } from "./mission-control.ts";
 import { latestMission } from "./missions.ts";
+import { buildMissionAuditReport } from "./quality-court.ts";
 import type { LandReport, MissionPlaybackFrame, SessionRecord, TaskArtifact } from "./types.ts";
 
+export type MissionPlaybackPhase =
+  | "all"
+  | "spec"
+  | "execution"
+  | "repair"
+  | "contracts"
+  | "acceptance"
+  | "landing"
+  | "audit";
+
 function frameSort(left: MissionPlaybackFrame, right: MissionPlaybackFrame): number {
-  return left.timestamp.localeCompare(right.timestamp) || left.title.localeCompare(right.title);
+  return String(left.timestamp ?? "").localeCompare(String(right.timestamp ?? "")) || left.title.localeCompare(right.title);
+}
+
+function isRepairFrame(frame: MissionPlaybackFrame): boolean {
+  const haystack = `${frame.title} ${frame.detail}`.toLowerCase();
+  return /\brepair\b|\bfix\b|\bdebug\b/.test(haystack);
+}
+
+export function filterMissionPlayback(
+  frames: MissionPlaybackFrame[],
+  phase: MissionPlaybackPhase
+): MissionPlaybackFrame[] {
+  if (phase === "all") {
+    return frames;
+  }
+
+  return frames.filter((frame) => {
+    if (phase === "contracts") {
+      return frame.kind === "contract";
+    }
+    if (phase === "acceptance") {
+      return frame.kind === "acceptance";
+    }
+    if (phase === "landing") {
+      return frame.kind === "landing";
+    }
+    if (phase === "audit") {
+      return frame.title.startsWith("Quality Court:") || frame.title.startsWith("Postmortem:");
+    }
+    if (phase === "repair") {
+      return isRepairFrame(frame);
+    }
+    if (phase === "spec") {
+      return (
+        frame.title.startsWith("Mission created:") ||
+        frame.title === "Mission created" ||
+        /planning|plan materialized|spec/i.test(frame.title) ||
+        /planning|plan materialized|spec/i.test(frame.detail)
+      );
+    }
+    if (phase === "execution") {
+      return (
+        frame.kind === "task" ||
+        frame.kind === "attempt" ||
+        frame.kind === "progress" ||
+        frame.kind === "receipt" ||
+        (frame.kind === "checkpoint" && !isRepairFrame(frame))
+      );
+    }
+    return true;
+  });
 }
 
 export function buildMissionPlayback(
@@ -18,6 +80,9 @@ export function buildMissionPlayback(
   }
 
   const missionArtifacts = artifacts.filter((artifact) => artifact.missionId === mission.id);
+  const missionReceipts = (session.receipts ?? []).filter((receipt) => receipt.missionId === mission.id);
+  const missionContracts = (session.contracts ?? []).filter((contract) => contract.missionId === mission.id);
+  const audit = buildMissionAuditReport(session, mission, artifacts);
   const frames: MissionPlaybackFrame[] = [
     {
       id: `playback-mission-${mission.id}`,
@@ -72,13 +137,37 @@ export function buildMissionPlayback(
       });
     }
 
+    if (artifact.finishedAt) {
+      frames.push({
+        id: `playback-finish-${artifact.taskId}`,
+        timestamp: artifact.finishedAt,
+        kind: "task",
+        title: `${artifact.owner} finished ${artifact.title}`,
+        detail: artifact.summary ?? artifact.error ?? "Task finished.",
+        taskId: artifact.taskId
+      });
+    }
+  }
+
+  for (const receipt of missionReceipts) {
     frames.push({
-      id: `playback-finish-${artifact.taskId}`,
-      timestamp: artifact.finishedAt,
-      kind: "task",
-      title: `${artifact.owner} finished ${artifact.title}`,
-      detail: artifact.summary ?? artifact.error ?? "Task finished.",
-      taskId: artifact.taskId
+      id: `playback-receipt-${receipt.id}`,
+      timestamp: receipt.createdAt,
+      kind: "receipt",
+      title: `${receipt.owner} receipt: ${receipt.title}`,
+      detail: `${receipt.outcome} | commands=${receipt.commands.join(" | ") || "-"} | changed=${receipt.changedPaths.join(", ") || "-"}`,
+      taskId: receipt.taskId
+    });
+  }
+
+  for (const contract of missionContracts) {
+    frames.push({
+      id: `playback-contract-${contract.id}`,
+      timestamp: contract.createdAt,
+      kind: "contract",
+      title: `${contract.sourceAgent} -> ${contract.targetAgent}: ${contract.title}`,
+      detail: `${contract.kind} | ${contract.status} | ${contract.detail}`,
+      taskId: contract.sourceTaskId
     });
   }
 
@@ -99,6 +188,38 @@ export function buildMissionPlayback(
       title: `Landed into ${latestLandReport.targetBranch}`,
       detail: latestLandReport.summary.join(" "),
       taskId: null
+    });
+  }
+
+  const postmortem = buildMissionPostmortem(session, mission, artifacts);
+  if (
+    postmortem.wins.length > 0 ||
+    postmortem.pains.length > 0 ||
+    postmortem.followUpDebt.length > 0
+  ) {
+    frames.push({
+      id: `playback-postmortem-${mission.id}`,
+      timestamp: postmortem.generatedAt,
+      kind: "mission",
+      title: `Postmortem: ${postmortem.outcome}`,
+      detail: [
+        postmortem.summary,
+        postmortem.wins[0] ? `win=${postmortem.wins[0]}` : "",
+        postmortem.pains[0] ? `pain=${postmortem.pains[0]}` : "",
+        postmortem.followUpDebt[0] ? `debt=${postmortem.followUpDebt[0]}` : ""
+      ].filter(Boolean).join(" | "),
+      taskId: null
+    });
+  }
+
+  if (audit && audit.objections.length > 0) {
+    frames.push({
+      id: `playback-audit-${mission.id}`,
+      timestamp: audit.generatedAt,
+      kind: "mission",
+      title: `Quality Court: ${audit.verdict}`,
+      detail: `${audit.summary} | first objection=${audit.objections[0]?.title ?? "none"}`,
+      taskId: audit.objections[0]?.likelyTaskIds[0] ?? null
     });
   }
 

@@ -2,6 +2,7 @@ import { buildClaimHotspots } from "./decision-ledger.ts";
 import { explainMissionAcceptanceFailures } from "./acceptance.ts";
 import { filterWorktreeChangedPaths } from "./git.ts";
 import { isMissionBlockingTask, latestMission, syncMissionStates } from "./missions.ts";
+import { buildMissionAuditReport } from "./quality-court.ts";
 import { activeFollowUpRecommendations, buildOperatorRecommendations } from "./recommendations.ts";
 import type {
   AgentName,
@@ -894,7 +895,14 @@ export function buildWorkflowSummary(
     includeDismissed: true
   });
   const activeMission = latestMission(snapshot.session);
+  const activeContracts = activeMission
+    ? (snapshot.session.contracts ?? []).filter(
+        (contract) => contract.missionId === activeMission.id && contract.status === "open"
+      )
+    : [];
+  const blockingContracts = activeContracts.filter((contract) => contract.dependencyImpact === "blocking");
   const missionObservability = buildMissionObservability(snapshot, artifacts, activeMission);
+  const missionAudit = activeMission ? buildMissionAuditReport(snapshot.session, activeMission, artifacts) : null;
   const hotspots = buildClaimHotspots(snapshot.session);
   const changedByAgent: WorkflowAgentChanges[] = ["codex", "claude"].map((agent) => ({
     agent,
@@ -954,6 +962,11 @@ export function buildWorkflowSummary(
       `${pendingFollowUps.length} follow-up recommendation(s) still need to be applied or dismissed before landing.`
     );
   }
+  if (blockingContracts.length > 0) {
+    blockers.push(
+      `${blockingContracts.length} blocking agent contract(s) still need fulfillment before landing.`
+    );
+  }
   if (activeMission?.acceptance.status === "failed") {
     blockers.push(
       acceptanceFailureExplanations[0]
@@ -968,12 +981,24 @@ export function buildWorkflowSummary(
   ) {
     blockers.push("Mission acceptance has not been verified yet.");
   }
+  if (missionAudit?.verdict === "blocked") {
+    blockers.push(
+      `Quality Court blocked shipping: ${missionAudit.objections
+        .filter((objection) => objection.severity === "critical")
+        .slice(0, 2)
+        .map((objection) => objection.title)
+        .join(" | ") || missionAudit.summary}`
+    );
+  }
 
   if (openReviews > 0) {
     warnings.push(`${openReviews} review thread(s) remain open.`);
   }
   if (activeRecommendations.length > 0) {
     warnings.push(`${activeRecommendations.length} active recommendation(s) remain.`);
+  }
+  if (activeContracts.length > 0) {
+    warnings.push(`${activeContracts.length} open agent contract(s) remain.`);
   }
   const degradedProviders = (snapshot.session.providerCapabilities ?? []).filter(
     (manifest) => manifest.status === "degraded" || manifest.status === "unsupported"
@@ -989,6 +1014,15 @@ export function buildWorkflowSummary(
   if ((missionObservability?.retriesUsed ?? 0) > 0) {
     warnings.push(
       `Mission has already used ${missionObservability?.retriesUsed ?? 0} retry attempt(s).`
+    );
+  }
+  if (missionAudit?.verdict === "warn") {
+    warnings.push(
+      `Quality Court found objections worth reviewing: ${missionAudit.objections
+        .filter((objection) => objection.severity !== "minor")
+        .slice(0, 2)
+        .map((objection) => objection.title)
+        .join(" | ") || missionAudit.summary}`
     );
   }
 
@@ -1048,6 +1082,9 @@ export function buildWorkflowSummary(
   if (pendingFollowUps.length > 0) {
     nextActions.push("Review the Recommendations tab and apply or dismiss the outstanding follow-up work before landing.");
   }
+  if (activeContracts.length > 0) {
+    nextActions.push("Review `kavi contracts` to resolve or fulfill the open agent contracts before landing.");
+  }
   if (activeMission?.shadowOfMissionId) {
     nextActions.push(
       `Compare this shadow mission against ${activeMission.shadowOfMissionId} with \`kavi mission compare ${activeMission.shadowOfMissionId} ${activeMission.id}\`, then select the preferred one with \`kavi mission select <mission-id>\`.`
@@ -1060,6 +1097,9 @@ export function buildWorkflowSummary(
     nextActions.push(
       `Inspect failed acceptance with \`kavi accept latest\`; focus first on: ${acceptanceFailureExplanations[0].repairFocus[0] ?? acceptanceFailureExplanations[0].title}.`
     );
+  }
+  if (missionAudit?.verdict !== "approved") {
+    nextActions.push("Run `kavi judge latest` to review Quality Court objections before shipping.");
   }
   if (state === "ready") {
     nextActions.push("Review the merged result summary in Results, then run `kavi land` or press `L` in the TUI.");

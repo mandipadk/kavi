@@ -25,7 +25,18 @@ export interface BrainGraphNode {
   retired: boolean;
   freshness: BrainEntry["freshness"] | null;
   confidence: number | null;
+  createdAt: string;
+  updatedAt: string;
 }
+
+export type BrainGraphMode =
+  | "all"
+  | "structural"
+  | "knowledge"
+  | "topology"
+  | "failure"
+  | "contract"
+  | "timeline";
 
 export interface BrainGraphEdge {
   from: string;
@@ -39,7 +50,8 @@ export interface BrainGraphEdge {
     | "evidence"
     | "command"
     | "scope"
-    | "category";
+    | "category"
+    | "timeline";
   weight: number;
   label: string;
 }
@@ -50,8 +62,62 @@ export interface BrainGraph {
   edges: BrainGraphEdge[];
 }
 
+export type BrainPackPhase = "planning" | "implementation" | "repair" | "verification";
+
+export interface BrainPackSection {
+  key: string;
+  title: string;
+  rationale: string;
+  entries: BrainEntry[];
+}
+
+export interface BrainPack {
+  missionId: string | null;
+  phase: BrainPackPhase;
+  summary: string;
+  pathHint: string | null;
+  sections: BrainPackSection[];
+}
+
+export interface BrainReviewItem {
+  entryId: string;
+  title: string;
+  category: BrainEntry["category"] | null;
+  scope: BrainEntry["scope"] | null;
+  severity: "low" | "medium" | "high";
+  reasons: string[];
+  recommendedAction: string;
+}
+
+export interface BrainDistillationPlan {
+  title: string;
+  category: BrainEntry["category"];
+  scope: BrainEntry["scope"];
+  missionId: string | null;
+  sourceEntryIds: string[];
+  content: string;
+  tags: string[];
+  evidence: string[];
+  commands: string[];
+}
+
 function unique(values: string[]): string[] {
   return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
+}
+
+function countBy<T>(values: T[], keyFn: (value: T) => string): Array<{ value: string; count: number }> {
+  const counts = new Map<string, number>();
+  for (const value of values) {
+    const key = keyFn(value).trim();
+    if (!key) {
+      continue;
+    }
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+
+  return [...counts.entries()]
+    .map(([value, count]) => ({ value, count }))
+    .sort((left, right) => right.count - left.count || left.value.localeCompare(right.value));
 }
 
 function normalizeText(value: string): string {
@@ -305,6 +371,125 @@ function inferRepoTags(files: string[]): string[] {
   ]);
 }
 
+function inferBrainPackPhase(task: TaskSpec | null): BrainPackPhase {
+  if (!task) {
+    return "planning";
+  }
+  if (task.kind === "planner" || task.kind === "kickoff" || task.nodeKind === "research") {
+    return "planning";
+  }
+  if (task.status === "failed" || task.nodeKind === "repair") {
+    return "repair";
+  }
+  if (
+    task.nodeKind === "tests" ||
+    task.nodeKind === "review" ||
+    /verify|verification|test|acceptance/i.test(task.title) ||
+    /verify|verification|test|acceptance/i.test(task.prompt)
+  ) {
+    return "verification";
+  }
+  return "implementation";
+}
+
+interface RepoCartography {
+  files: string[];
+  packageScripts: string[];
+  structuralEdges: Array<{ from: string; to: string; kind: "local" | "external" }>;
+  rootDirectories: string[];
+  entrypoints: string[];
+  tags: string[];
+  commands: string[];
+  localEdges: Array<{ from: string; to: string; kind: "local" | "external" }>;
+  externalEdges: Array<{ from: string; to: string; kind: "local" | "external" }>;
+  commonLocalTargets: string[];
+  commonExternalTargets: string[];
+  contractSurfaces: string[];
+  routeSurfaces: string[];
+  verificationSurfaces: string[];
+  serviceSurfaces: string[];
+  dependencyHotspots: string[];
+  testCommands: string[];
+  buildCommands: string[];
+  routeEntrypoints: string[];
+}
+
+async function cartographRepo(repoRoot: string): Promise<RepoCartography> {
+  const files = await collectRepoTree(repoRoot, ".", 2);
+  const packageScripts = await readPackageScripts(repoRoot);
+  const structuralEdges = await collectStructuralEdges(repoRoot, files);
+  const rootDirectories = unique(
+    files
+      .filter((filePath) => filePath.includes("/"))
+      .map((filePath) => filePath.split("/")[0] ?? "")
+  ).slice(0, 10);
+  const entrypoints = files
+    .filter((filePath) =>
+      /(^README\.md$|^main\.(go|py|rs|ts)$|^src\/main\.(ts|tsx)$|^app\/page\.(ts|tsx|js|jsx)$|^apps\/[^/]+\/app\/page\.(ts|tsx|js|jsx)$|^apps\/[^/]+\/src\/main\.(ts|tsx)$)/i.test(
+        filePath
+      )
+    )
+    .slice(0, 12);
+  const tags = inferRepoTags(files);
+  const commands = inferRepoCommands(repoRoot, files, packageScripts);
+  const localEdges = structuralEdges.filter((edge) => edge.kind === "local");
+  const externalEdges = structuralEdges.filter((edge) => edge.kind === "external");
+  const commonLocalTargets = unique(localEdges.map((edge) => edge.to)).slice(0, 12);
+  const commonExternalTargets = unique(externalEdges.map((edge) => edge.to)).slice(0, 12);
+  const dependencyHotspots = unique(
+    countBy(localEdges, (edge) => edge.to)
+      .slice(0, 10)
+      .map((item) => item.value)
+  );
+  const contractSurfaces = files
+    .filter((filePath) =>
+      /(schema|contract|types?|openapi|graphql|proto|dto|interface)/i.test(filePath)
+    )
+    .slice(0, 14);
+  const routeSurfaces = files
+    .filter((filePath) =>
+      /(route|router|page|layout|endpoint|handler|controller|api)/i.test(filePath)
+    )
+    .slice(0, 14);
+  const verificationSurfaces = files
+    .filter((filePath) =>
+      /(^tests\/|\.test\.|\.spec\.|playwright|cypress|vitest|jest|pytest|integration|acceptance)/i.test(filePath)
+    )
+    .slice(0, 14);
+  const serviceSurfaces = unique([
+    ...files.filter((filePath) => /(apps\/[^/]+|packages\/[^/]+|services\/[^/]+)/i.test(filePath)),
+    ...files.filter((filePath) => /(api|worker|server|web|frontend|backend)/i.test(filePath))
+  ]).slice(0, 14);
+  const testCommands = commands.filter((command) => /test|verify|pytest|cargo test|go test/i.test(command)).slice(0, 8);
+  const buildCommands = commands.filter((command) => /build|compile/i.test(command)).slice(0, 8);
+  const routeEntrypoints = unique([
+    ...routeSurfaces,
+    ...entrypoints.filter((filePath) => /(page|route|handler|controller|api)/i.test(filePath))
+  ]).slice(0, 14);
+
+  return {
+    files,
+    packageScripts,
+    structuralEdges,
+    rootDirectories,
+    entrypoints,
+    tags,
+    commands,
+    localEdges,
+    externalEdges,
+    commonLocalTargets,
+    commonExternalTargets,
+    contractSurfaces,
+    routeSurfaces,
+    verificationSurfaces,
+    serviceSurfaces,
+    dependencyHotspots,
+    testCommands,
+    buildCommands,
+    routeEntrypoints
+  };
+}
+
 function sourceAuthority(sourceType: BrainEntry["sourceType"]): number {
   switch (sourceType) {
     case "operator":
@@ -413,8 +598,15 @@ export function addBrainEntry(
     if (entry.scope !== (input.scope ?? (input.missionId ? "mission" : "repo"))) {
       return false;
     }
+    const strictTitleMatch =
+      (input.category ?? "artifact") === "topology" ||
+      (input.category ?? "artifact") === "verification" ||
+      (input.category ?? "artifact") === "contract";
     return (
-      (normalizeText(entry.title) === normalizeText(input.title) || entrySimilarity(entry, input) >= 0.45) &&
+      (
+        normalizeText(entry.title) === normalizeText(input.title) ||
+        (!strictTitleMatch && entrySimilarity(entry, input) >= 0.45)
+      ) &&
       normalizeText(entry.content) !== normalizeText(input.content)
     );
   });
@@ -491,7 +683,7 @@ export function captureMissionBrainEntries(session: SessionRecord, mission: Miss
         missionId: mission.id,
         taskId: null,
         sourceType: "mission",
-        category: "procedure",
+        category: "contract",
         scope: "mission",
         title: `Acceptance contract: ${mission.title}`,
         content: [
@@ -544,10 +736,20 @@ export function captureTaskBrainEntry(session: SessionRecord, task: TaskSpec): B
   }
 
   const title = task.kind === "planner" ? `Mission plan: ${task.title}` : `Task result: ${task.title}`;
+  const lowerSummary = task.summary.toLowerCase();
+  const category =
+    task.status === "failed"
+      ? "failure"
+      : task.kind === "planner"
+        ? "decision"
+        : /verify|verification|validated|test|tests|passed/i.test(lowerSummary) || task.nodeKind === "tests"
+          ? "verification"
+          : "artifact";
   const content = [
     shortText(task.summary, 240),
     task.claimedPaths.length > 0 ? `Paths: ${task.claimedPaths.join(", ")}` : null,
-    task.routeReason ? `Route: ${task.routeReason}` : null
+    task.routeReason ? `Route: ${task.routeReason}` : null,
+    task.lastFailureSummary ? `Failure: ${task.lastFailureSummary}` : null
   ]
     .filter(Boolean)
     .join("\n");
@@ -556,7 +758,7 @@ export function captureTaskBrainEntry(session: SessionRecord, task: TaskSpec): B
     missionId: task.missionId,
     taskId: task.id,
     sourceType: "task",
-    category: task.kind === "planner" ? "decision" : "artifact",
+    category,
     scope: task.missionId ? "mission" : "repo",
     title,
     content,
@@ -611,50 +813,29 @@ export async function captureRepoTopologyBrainEntries(
   repoRoot: string,
   _missionId: string | null = null
 ): Promise<BrainEntry[]> {
-  const files = await collectRepoTree(repoRoot, ".", 2);
-  if (files.length === 0) {
+  const cartography = await cartographRepo(repoRoot);
+  if (cartography.files.length === 0) {
     return [];
   }
-
-  const packageScripts = await readPackageScripts(repoRoot);
-  const structuralEdges = await collectStructuralEdges(repoRoot, files);
-  const rootDirectories = unique(
-    files
-      .filter((filePath) => filePath.includes("/"))
-      .map((filePath) => filePath.split("/")[0] ?? "")
-  ).slice(0, 10);
-  const entrypoints = files
-    .filter((filePath) =>
-      /(^README\.md$|^main\.(go|py|rs|ts)$|^src\/main\.(ts|tsx)$|^app\/page\.(ts|tsx|js|jsx)$|^apps\/[^/]+\/app\/page\.(ts|tsx|js|jsx)$|^apps\/[^/]+\/src\/main\.(ts|tsx)$)/i.test(
-        filePath
-      )
-    )
-    .slice(0, 12);
-  const tags = inferRepoTags(files);
-  const commands = inferRepoCommands(repoRoot, files, packageScripts);
-  const localEdges = structuralEdges.filter((edge) => edge.kind === "local");
-  const externalEdges = structuralEdges.filter((edge) => edge.kind === "external");
-  const commonLocalTargets = unique(localEdges.map((edge) => edge.to)).slice(0, 12);
-  const commonExternalTargets = unique(externalEdges.map((edge) => edge.to)).slice(0, 12);
 
   const topology = addBrainEntry(session, {
     missionId: null,
     taskId: null,
     sourceType: "mission",
-    category: "fact",
+    category: "topology",
     scope: "repo",
     title: "Repo topology",
     content: [
-      `Root directories: ${rootDirectories.join(", ") || "-"}`,
-      `Entry surfaces: ${entrypoints.join(", ") || "-"}`,
-      `Signals: ${tags.join(", ") || "-"}`,
-      `Representative files: ${files.slice(0, 18).join(", ")}`
+      `Root directories: ${cartography.rootDirectories.join(", ") || "-"}`,
+      `Entry surfaces: ${cartography.entrypoints.join(", ") || "-"}`,
+      `Signals: ${cartography.tags.join(", ") || "-"}`,
+      `Representative files: ${cartography.files.slice(0, 18).join(", ")}`
     ].join("\n"),
-    tags: [...tags, ...rootDirectories],
+    tags: [...cartography.tags, ...cartography.rootDirectories],
     confidence: 0.82,
     freshness: "live",
-    evidence: [...entrypoints, ...files.slice(0, 18)],
-    commands,
+    evidence: [...cartography.entrypoints, ...cartography.files.slice(0, 18)],
+    commands: cartography.commands,
     pinned: false
   });
 
@@ -666,14 +847,16 @@ export async function captureRepoTopologyBrainEntries(
     scope: "repo",
     title: "Repo runbook",
     content: [
-      `Likely verification commands: ${commands.join(" | ") || "-"}`,
-      packageScripts.length > 0 ? `Package scripts: ${packageScripts.join(" | ")}` : "Package scripts: -"
+      `Likely verification commands: ${cartography.commands.join(" | ") || "-"}`,
+      cartography.packageScripts.length > 0
+        ? `Package scripts: ${cartography.packageScripts.join(" | ")}`
+        : "Package scripts: -"
     ].join("\n"),
-    tags: [...tags, "runbook", "verification"],
+    tags: [...cartography.tags, "runbook", "verification"],
     confidence: 0.8,
     freshness: "live",
-    evidence: [...entrypoints],
-    commands,
+    evidence: [...cartography.entrypoints],
+    commands: cartography.commands,
     pinned: false
   });
 
@@ -681,26 +864,118 @@ export async function captureRepoTopologyBrainEntries(
     missionId: null,
     taskId: null,
     sourceType: "mission",
-    category: "decision",
+    category: "topology",
     scope: "repo",
     title: "Repo structure graph",
     content: [
-      `Local module edges: ${localEdges.length > 0 ? localEdges.slice(0, 16).map((edge) => `${edge.from} -> ${edge.to}`).join(" | ") : "-"}`,
-      `External dependencies: ${commonExternalTargets.join(", ") || "-"}`,
-      `Internal dependency hotspots: ${commonLocalTargets.join(", ") || "-"}`
+      `Local module edges: ${cartography.localEdges.length > 0 ? cartography.localEdges.slice(0, 16).map((edge) => `${edge.from} -> ${edge.to}`).join(" | ") : "-"}`,
+      `External dependencies: ${cartography.commonExternalTargets.join(", ") || "-"}`,
+      `Internal dependency hotspots: ${cartography.commonLocalTargets.join(", ") || "-"}`
     ].join("\n"),
-    tags: [...tags, ...commonLocalTargets, ...commonExternalTargets],
+    tags: [...cartography.tags, ...cartography.commonLocalTargets, ...cartography.commonExternalTargets],
     confidence: 0.74,
     freshness: "live",
     evidence: unique([
-      ...localEdges.slice(0, 12).map((edge) => edge.from),
-      ...entrypoints
+      ...cartography.localEdges.slice(0, 12).map((edge) => edge.from),
+      ...cartography.entrypoints
     ]),
-    commands,
+    commands: cartography.commands,
     pinned: false
   });
 
-  return [topology, runbook, structure];
+  const contracts = addBrainEntry(session, {
+    missionId: null,
+    taskId: null,
+    sourceType: "mission",
+    category: "contract",
+    scope: "repo",
+    title: "Repo contract surfaces",
+    content: [
+      `Contract surfaces: ${cartography.contractSurfaces.join(", ") || "-"}`,
+      `Route surfaces: ${cartography.routeSurfaces.join(", ") || "-"}`,
+      `Service surfaces: ${cartography.serviceSurfaces.join(", ") || "-"}`
+    ].join("\n"),
+    tags: [...cartography.tags, ...cartography.contractSurfaces.slice(0, 8), ...cartography.routeSurfaces.slice(0, 6)],
+    confidence: 0.77,
+    freshness: "live",
+    evidence: unique([
+      ...cartography.contractSurfaces.slice(0, 10),
+      ...cartography.routeSurfaces.slice(0, 8)
+    ]),
+    commands: cartography.commands,
+    pinned: false
+  });
+
+  const verification = addBrainEntry(session, {
+    missionId: null,
+    taskId: null,
+    sourceType: "mission",
+    category: "verification",
+    scope: "repo",
+    title: "Repo verification surfaces",
+    content: [
+      `Verification files: ${cartography.verificationSurfaces.join(", ") || "-"}`,
+      `Likely commands: ${cartography.commands.join(" | ") || "-"}`,
+      `External dependencies: ${cartography.commonExternalTargets.join(", ") || "-"}`
+    ].join("\n"),
+    tags: [...cartography.tags, "verification", ...cartography.verificationSurfaces.slice(0, 8)],
+    confidence: 0.79,
+    freshness: "live",
+    evidence: unique([
+      ...cartography.verificationSurfaces.slice(0, 10),
+      ...cartography.entrypoints.slice(0, 4)
+    ]),
+    commands: cartography.commands,
+    pinned: false
+  });
+
+  const routes = addBrainEntry(session, {
+    missionId: null,
+    taskId: null,
+    sourceType: "mission",
+    category: "topology",
+    scope: "repo",
+    title: "Repo route and entry surfaces",
+    content: [
+      `Route entrypoints: ${cartography.routeEntrypoints.join(", ") || "-"}`,
+      `Service surfaces: ${cartography.serviceSurfaces.join(", ") || "-"}`,
+      `Dependency hotspots: ${cartography.dependencyHotspots.join(", ") || "-"}`
+    ].join("\n"),
+    tags: [...cartography.tags, "routes", ...cartography.routeEntrypoints.slice(0, 8)],
+    confidence: 0.76,
+    freshness: "live",
+    evidence: unique([
+      ...cartography.routeEntrypoints.slice(0, 10),
+      ...cartography.serviceSurfaces.slice(0, 8)
+    ]),
+    commands: cartography.commands,
+    pinned: false
+  });
+
+  const verificationMatrix = addBrainEntry(session, {
+    missionId: null,
+    taskId: null,
+    sourceType: "mission",
+    category: "verification",
+    scope: "repo",
+    title: "Repo verification matrix",
+    content: [
+      `Test commands: ${cartography.testCommands.join(" | ") || "-"}`,
+      `Build commands: ${cartography.buildCommands.join(" | ") || "-"}`,
+      `Verification surfaces: ${cartography.verificationSurfaces.join(", ") || "-"}`
+    ].join("\n"),
+    tags: [...cartography.tags, "verification-matrix", ...cartography.verificationSurfaces.slice(0, 8)],
+    confidence: 0.81,
+    freshness: "live",
+    evidence: unique([
+      ...cartography.verificationSurfaces.slice(0, 10),
+      ...cartography.routeEntrypoints.slice(0, 4)
+    ]),
+    commands: unique([...cartography.testCommands, ...cartography.buildCommands]),
+    pinned: false
+  });
+
+  return [topology, runbook, structure, contracts, verification, routes, verificationMatrix];
 }
 
 export function retireBrainEntry(
@@ -916,6 +1191,356 @@ export function relevantBrainEntries(
   return searchBrainEntries(session, query, limit);
 }
 
+function dominantValue<T extends string>(values: T[], fallback: T): T {
+  const counts = new Map<T, number>();
+  for (const value of values) {
+    counts.set(value, (counts.get(value) ?? 0) + 1);
+  }
+  return [...counts.entries()].sort((left, right) => right[1] - left[1])[0]?.[0] ?? fallback;
+}
+
+function packSection(
+  key: string,
+  title: string,
+  rationale: string,
+  entries: BrainEntry[],
+  limit: number
+): BrainPackSection | null {
+  const uniqueEntries = uniqBrainEntries(entries).slice(0, limit);
+  if (uniqueEntries.length === 0) {
+    return null;
+  }
+  return {
+    key,
+    title,
+    rationale,
+    entries: uniqueEntries
+  };
+}
+
+export function buildBrainPack(
+  session: SessionRecord,
+  options: {
+    missionId?: string | null;
+    task?: TaskSpec | null;
+    phase?: BrainPackPhase;
+    path?: string | null;
+    includeRetired?: boolean;
+    limit?: number;
+  } = {}
+): BrainPack {
+  const limit = Math.max(2, options.limit ?? 4);
+  const includeRetired = options.includeRetired === true;
+  const missionId = options.task?.missionId ?? options.missionId ?? null;
+  const task = options.task ?? null;
+  const phase = options.phase ?? inferBrainPackPhase(task);
+  const pathHint = options.path ?? task?.claimedPaths[0] ?? null;
+  const missionEntries = (Array.isArray(session.brain) ? session.brain : [])
+    .filter((entry) => (includeRetired || !entry.retiredAt))
+    .filter((entry) => (missionId ? entry.missionId === missionId : false));
+  const pathEntries = queryBrainEntries(session, {
+    missionId,
+    path: pathHint,
+    includeRetired,
+    limit: Math.max(limit * 2, 8)
+  });
+  const relevant = task
+    ? relevantBrainEntries(session, task, Math.max(limit * 2, 8))
+    : queryBrainEntries(session, {
+        missionId,
+        path: pathHint,
+        includeRetired,
+        limit: Math.max(limit * 2, 8)
+      });
+  const repoTopology = queryBrainEntries(session, {
+    category: "topology",
+    scope: "repo",
+    includeRetired,
+    limit
+  });
+  const contracts = uniqBrainEntries([
+    ...missionEntries.filter((entry) => entry.category === "contract"),
+    ...queryBrainEntries(session, {
+      missionId,
+      category: "contract",
+      includeRetired,
+      limit
+    })
+  ]);
+  const procedures = queryBrainEntries(session, {
+    missionId,
+    category: "procedure",
+    includeRetired,
+    limit: Math.max(limit * 2, 8)
+  });
+  const risks = uniqBrainEntries([
+    ...missionEntries.filter((entry) => entry.category === "risk" || entry.category === "failure"),
+    ...queryBrainEntries(session, {
+      missionId,
+      category: "risk",
+      includeRetired,
+      limit
+    }),
+    ...queryBrainEntries(session, {
+      missionId,
+      category: "failure",
+      includeRetired,
+      limit
+    })
+  ]);
+  const verification = uniqBrainEntries([
+    ...missionEntries.filter((entry) => entry.category === "verification" || entry.category === "contract"),
+    ...queryBrainEntries(session, {
+      missionId,
+      category: "verification",
+      includeRetired,
+      limit: Math.max(limit * 2, 8)
+    })
+  ]);
+  const patterns = (Array.isArray(session.brain) ? session.brain : [])
+    .filter((entry) => (includeRetired || !entry.retiredAt))
+    .filter((entry) => entry.sourceType === "pattern")
+    .filter((entry) => relevant.some((item) => item.id === entry.id) || pathEntries.some((item) => item.id === entry.id));
+
+  const sections: BrainPackSection[] = [];
+  const maybeSections = phase === "planning"
+    ? [
+        packSection("mission", "Mission frame", "Spec, blueprint, and explicit mission decisions to preserve intent.", missionEntries.filter((entry) => entry.category === "fact" || entry.category === "decision" || entry.category === "contract"), limit),
+        packSection("topology", "Repo cartography", "Structural repo map and service/layout signals for planning.", repoTopology, limit),
+        packSection("procedures", "Procedures", "Runnable commands and repo runbook context.", procedures, limit),
+        packSection("patterns", "Pattern leverage", "Prior successful patterns relevant to this mission slice.", patterns, limit),
+        packSection("risks", "Risks", "Known mission risks, contradictions, or failure signals before execution.", risks, limit)
+      ]
+    : phase === "repair"
+      ? [
+          packSection("failures", "Failure context", "Recent failures and risky areas most relevant to the current repair.", risks, limit),
+          packSection("verification", "Verification signals", "Checks, acceptance, and evidence needed to close the repair loop.", verification, limit),
+          packSection("topology", "Repo cartography", "Structural targets and file surfaces touched by the repair.", uniqBrainEntries([...pathEntries, ...repoTopology]), limit),
+          packSection("procedures", "Recovery procedures", "Commands and runbook steps useful during repair work.", procedures, limit)
+        ]
+      : phase === "verification"
+        ? [
+            packSection("verification", "Verification context", "Acceptance, test, and verification knowledge for this mission.", verification, limit),
+            packSection("contracts", "Contracts and expectations", "Shared contracts and acceptance obligations to validate.", contracts, limit),
+            packSection("topology", "Touched surfaces", "Structural targets and changed-path context for verification.", uniqBrainEntries([...pathEntries, ...repoTopology]), limit),
+            packSection("risks", "Residual risks", "Known contradictions or unresolved risks that can invalidate done-ness.", risks, limit)
+          ]
+        : [
+            packSection("implementation", "Implementation context", "Most relevant repo and mission memory for the current execution slice.", uniqBrainEntries([...relevant, ...pathEntries]), limit),
+            packSection("contracts", "Shared contracts", "Constraints, interfaces, and mission contract expectations.", contracts, limit),
+            packSection("topology", "Repo cartography", "Structural map of the code surfaces most likely to matter.", uniqBrainEntries([...pathEntries, ...repoTopology]), limit),
+            packSection("procedures", "Runbook and procedures", "Helpful commands and repo-specific working habits.", procedures, limit),
+            packSection("risks", "Risks", "Known fragile areas or failure signals to keep in mind while editing.", risks, limit)
+          ];
+
+  for (const section of maybeSections) {
+    if (section) {
+      sections.push(section);
+    }
+  }
+
+  const summary = [
+    `Phase: ${phase}`,
+    `Mission entries: ${missionEntries.length}`,
+    `Relevant memory: ${relevant.length}`,
+    `Topology signals: ${repoTopology.length}`,
+    `Contracts: ${contracts.length}`,
+    `Verification signals: ${verification.length}`,
+    `Risks/failures: ${risks.length}`
+  ].join(" | ");
+
+  return {
+    missionId,
+    phase,
+    summary,
+    pathHint,
+    sections
+  };
+}
+
+export function buildBrainReviewQueue(
+  session: SessionRecord,
+  options: {
+    missionId?: string | null;
+    includeRetired?: boolean;
+    limit?: number;
+  } = {}
+): BrainReviewItem[] {
+  const includeRetired = options.includeRetired === true;
+  const limit = Math.max(1, options.limit ?? 20);
+  const entries = (Array.isArray(session.brain) ? session.brain : [])
+    .filter((entry) => includeRetired || !entry.retiredAt || entry.pinned)
+    .filter((entry) => (options.missionId ? entry.missionId === options.missionId : true));
+
+  const duplicateTitleCounts = new Map<string, number>();
+  for (const entry of entries) {
+    const key = `${entry.category ?? "artifact"}:${entry.scope ?? "repo"}:${normalizeText(entry.title)}`;
+    duplicateTitleCounts.set(key, (duplicateTitleCounts.get(key) ?? 0) + 1);
+  }
+
+  const reviewItems = entries
+    .map((entry) => {
+      const reasons: string[] = [];
+      if ((entry.contradictions ?? []).length > 0) {
+        reasons.push(`Contradicted by ${(entry.contradictions ?? []).length} related entr${(entry.contradictions ?? []).length === 1 ? "y" : "ies"}.`);
+      }
+      if (entry.supersededBy && !entry.retiredAt) {
+        reasons.push(`Superseded by ${entry.supersededBy} but still active.`);
+      }
+      if ((entry.freshness ?? inferFreshness(entry.updatedAt)) === "stale" && !entry.retiredAt) {
+        reasons.push("Stale and should be reviewed for freshness.");
+      }
+      if (entry.pinned && entry.retiredAt) {
+        reasons.push("Pinned entry is retired and may need operator cleanup.");
+      }
+      const duplicateKey = `${entry.category ?? "artifact"}:${entry.scope ?? "repo"}:${normalizeText(entry.title)}`;
+      if ((duplicateTitleCounts.get(duplicateKey) ?? 0) > 1 && !entry.retiredAt) {
+        reasons.push("Shares a duplicated title cluster and may benefit from distillation.");
+      }
+      if ((entry.confidence ?? 0.6) < 0.55 && !entry.retiredAt) {
+        reasons.push("Low confidence entry is still active.");
+      }
+      if (reasons.length === 0) {
+        return null;
+      }
+
+      const severity: BrainReviewItem["severity"] =
+        reasons.some((reason) => /Contradicted|Superseded/.test(reason))
+          ? "high"
+          : reasons.some((reason) => /Stale|Pinned/.test(reason))
+            ? "medium"
+            : "low";
+      const recommendedAction =
+        severity === "high"
+          ? "Compare, merge, or retire this entry before relying on it heavily."
+          : severity === "medium"
+            ? "Review freshness or pin state and decide whether to keep it active."
+            : "Consider distilling or merging this entry to reduce Brain noise.";
+
+      return {
+        entryId: entry.id,
+        title: entry.title,
+        category: entry.category ?? null,
+        scope: entry.scope ?? null,
+        severity,
+        reasons,
+        recommendedAction
+      } satisfies BrainReviewItem;
+    })
+    .filter((item): item is BrainReviewItem => item !== null)
+    .sort((left, right) => {
+      const severityWeight = { high: 3, medium: 2, low: 1 };
+      return severityWeight[right.severity] - severityWeight[left.severity] ||
+        left.title.localeCompare(right.title);
+    })
+    .slice(0, limit);
+
+  return reviewItems;
+}
+
+export function buildBrainDistillationPlan(
+  session: SessionRecord,
+  options: {
+    missionId?: string | null;
+    category?: BrainEntry["category"] | "all";
+    scope?: BrainEntry["scope"] | "all";
+    query?: string;
+    limit?: number;
+  } = {}
+): BrainDistillationPlan | null {
+  const limit = Math.max(2, options.limit ?? 8);
+  const candidates = queryBrainEntries(session, {
+    missionId: options.missionId ?? null,
+    query: options.query ?? "",
+    category: options.category ?? "all",
+    scope: options.scope ?? "all",
+    includeRetired: false,
+    limit: Math.max(limit * 2, 12)
+  }).filter((entry) => !entry.retiredAt);
+
+  if (candidates.length < 2) {
+    return null;
+  }
+
+  const selected = candidates.slice(0, limit);
+  const category = dominantValue(
+    selected.map((entry) => entry.category ?? "artifact"),
+    "artifact"
+  );
+  const scope = dominantValue(
+    selected.map((entry) => entry.scope ?? (entry.missionId ? "mission" : "repo")),
+    options.missionId ? "mission" : "repo"
+  );
+  const missionId = options.missionId ?? dominantValue(
+    selected.map((entry) => entry.missionId ?? "__repo__"),
+    "__repo__"
+  );
+  const realMissionId = missionId === "__repo__" ? null : missionId;
+  const tags = unique(selected.flatMap((entry) => entry.tags)).slice(0, 12);
+  const evidence = unique(selected.flatMap((entry) => entry.evidence ?? [])).slice(0, 12);
+  const commands = unique(selected.flatMap((entry) => entry.commands ?? [])).slice(0, 8);
+  const headline = realMissionId
+    ? `Distilled ${category} context for ${realMissionId}`
+    : `Distilled ${scope} ${category} context`;
+  const content = [
+    `Distilled from ${selected.length} Brain entries.`,
+    `Key entries: ${selected.map((entry) => entry.title).join(" | ")}`,
+    `Shared signals: ${tags.join(", ") || "-"}`,
+    `Evidence: ${evidence.join(", ") || "-"}`,
+    `Commands: ${commands.join(" | ") || "-"}`,
+    "Key points:",
+    ...selected.slice(0, 5).map((entry) => `- ${entry.title}: ${shortText(entry.content, 180)}`)
+  ].join("\n");
+
+  return {
+    title: headline,
+    category,
+    scope,
+    missionId: realMissionId,
+    sourceEntryIds: selected.map((entry) => entry.id),
+    content,
+    tags,
+    evidence,
+    commands
+  };
+}
+
+export function applyBrainDistillationPlan(
+  session: SessionRecord,
+  plan: BrainDistillationPlan
+): BrainEntry {
+  const entry = addBrainEntry(session, {
+    missionId: plan.missionId,
+    taskId: null,
+    sourceType: "operator",
+    category: plan.category,
+    scope: plan.scope,
+    title: plan.title,
+    content: plan.content,
+    tags: plan.tags,
+    confidence: 0.9,
+    freshness: "live",
+    evidence: plan.evidence,
+    commands: plan.commands,
+    supersedes: plan.sourceEntryIds,
+    pinned: false
+  });
+
+  const retiredAt = nowIso();
+  for (const sourceId of plan.sourceEntryIds) {
+    const source = (Array.isArray(session.brain) ? session.brain : []).find((item) => item.id === sourceId) ?? null;
+    if (!source || source.id === entry.id || source.pinned) {
+      continue;
+    }
+    source.retiredAt = retiredAt;
+    source.updatedAt = retiredAt;
+    source.freshness = "stale";
+    source.supersededBy = entry.id;
+  }
+
+  return entry;
+}
+
 export function relatedBrainEntries(
   session: SessionRecord,
   entryId: string,
@@ -1009,7 +1634,79 @@ function brainGraphNode(entry: BrainEntry): BrainGraphNode {
     pinned: entry.pinned === true,
     retired: Boolean(entry.retiredAt),
     freshness: entry.freshness ?? null,
-    confidence: typeof entry.confidence === "number" ? entry.confidence : null
+    confidence: typeof entry.confidence === "number" ? entry.confidence : null,
+    createdAt: entry.createdAt,
+    updatedAt: entry.updatedAt
+  };
+}
+
+function graphModeNodePredicate(mode: BrainGraphMode, node: BrainGraphNode): boolean {
+  switch (mode) {
+    case "all":
+      return true;
+    case "structural":
+      return node.category === "topology" || node.category === "contract" || node.category === "verification";
+    case "knowledge":
+      return node.category !== "topology" && node.category !== "verification";
+    case "topology":
+      return node.category === "topology" || node.category === "contract";
+    case "failure":
+      return node.category === "failure" || node.category === "risk" || node.category === "verification";
+    case "contract":
+      return node.category === "contract" || node.category === "topology" || node.category === "verification";
+    case "timeline":
+      return true;
+  }
+}
+
+function graphModeEdgePredicate(mode: BrainGraphMode, edge: BrainGraphEdge): boolean {
+  switch (mode) {
+    case "all":
+      return true;
+    case "structural":
+      return ["mission", "task", "evidence", "command", "scope", "category"].includes(edge.kind);
+    case "knowledge":
+      return ["supersedes", "contradicts", "tag", "category"].includes(edge.kind);
+    case "topology":
+      return ["evidence", "command", "scope", "category", "tag"].includes(edge.kind);
+    case "failure":
+      return ["contradicts", "supersedes", "tag", "evidence", "timeline"].includes(edge.kind);
+    case "contract":
+      return ["mission", "task", "evidence", "command", "tag", "timeline"].includes(edge.kind);
+    case "timeline":
+      return edge.kind === "timeline" || edge.kind === "mission" || edge.kind === "task";
+  }
+}
+
+export function filterBrainGraphMode(
+  graph: BrainGraph,
+  mode: BrainGraphMode
+): BrainGraph {
+  if (mode === "all") {
+    return graph;
+  }
+
+  const visibleNodeIds = new Set(
+    graph.nodes.filter((node) => graphModeNodePredicate(mode, node)).map((node) => node.id)
+  );
+  if (graph.focusEntryId) {
+    visibleNodeIds.add(graph.focusEntryId);
+  }
+
+  const edges = graph.edges.filter((edge) =>
+    graphModeEdgePredicate(mode, edge) &&
+    visibleNodeIds.has(edge.from) &&
+    visibleNodeIds.has(edge.to)
+  );
+  for (const edge of edges) {
+    visibleNodeIds.add(edge.from);
+    visibleNodeIds.add(edge.to);
+  }
+
+  return {
+    ...graph,
+    edges,
+    nodes: graph.nodes.filter((node) => visibleNodeIds.has(node.id))
   };
 }
 
@@ -1232,6 +1929,32 @@ export function buildBrainGraph(
         });
       }
     }
+  }
+
+  const timelineEntries = [...scopedEntries].sort(
+    (left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt)
+  );
+  for (let index = 1; index < timelineEntries.length; index += 1) {
+    const previous = timelineEntries[index - 1];
+    const next = timelineEntries[index];
+    if (!previous || !next) {
+      continue;
+    }
+    if (
+      previous.missionId &&
+      next.missionId &&
+      previous.missionId !== next.missionId &&
+      previous.scope !== next.scope
+    ) {
+      continue;
+    }
+    pushBrainGraphEdge(edges, {
+      from: previous.id,
+      to: next.id,
+      kind: "timeline",
+      weight: 1,
+      label: "next in time"
+    });
   }
 
   return {

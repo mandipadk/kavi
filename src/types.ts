@@ -10,6 +10,14 @@ export type MissionAutonomyLevel = "inspect" | "guided" | "autonomous" | "overni
 export type MissionVerificationMode = "standard" | "strict";
 export type MissionLandPolicy = "manual_review" | "acceptance_gated";
 export type MissionHealthState = "healthy" | "watch" | "blocked";
+export type MissionPhase =
+  | "specifying"
+  | "simulating"
+  | "executing"
+  | "repairing"
+  | "verifying"
+  | "landing"
+  | "postmortem";
 export type MissionStatus =
   | "planning"
   | "active"
@@ -29,10 +37,28 @@ export type AcceptanceCheckKind =
   | "browser";
 export type AcceptanceCheckStatus = "pending" | "passed" | "failed" | "skipped";
 export type AcceptancePackStatus = "pending" | "passed" | "failed";
-export type BrainEntryCategory = "fact" | "decision" | "procedure" | "risk" | "artifact";
+export type BrainEntryCategory =
+  | "fact"
+  | "decision"
+  | "procedure"
+  | "risk"
+  | "artifact"
+  | "topology"
+  | "contract"
+  | "failure"
+  | "verification";
 export type BrainEntryScope = "repo" | "mission" | "personal" | "pattern";
 export type BrainEntryFreshness = "live" | "recent" | "stale";
 export type PatternKind = "micro" | "architecture" | "delivery" | "anti_pattern";
+export type AgentContractKind =
+  | "request_contract"
+  | "request_stub"
+  | "request_refinement"
+  | "request_review"
+  | "request_verification"
+  | "request_risk_check"
+  | "handoff_complete";
+export type AgentContractStatus = "open" | "resolved" | "dismissed";
 export type MissionNodeKind =
   | "research"
   | "scaffold"
@@ -456,11 +482,78 @@ export interface AcceptanceCheck {
   lastOutput: string | null;
 }
 
+export interface AcceptanceFailurePack {
+  id: string;
+  missionId: string;
+  checkId: string;
+  kind: AcceptanceCheckKind;
+  title: string;
+  summary: string;
+  expected: string[];
+  observed: string[];
+  evidence: string[];
+  likelyOwners: AgentName[];
+  likelyTaskIds: string[];
+  attribution: string | null;
+  repairFocus: string[];
+  command: string | null;
+  harnessPath: string | null;
+  serverCommand: string | null;
+  request: {
+    method: string | null;
+    urlPath: string | null;
+    routeCandidates: string[];
+    headers: Record<string, string>;
+    body: string | null;
+    selector: string | null;
+    selectorCandidates: string[];
+  };
+  expectedSignals: {
+    title: string | null;
+    status: number | null;
+    contentType: string | null;
+    text: string[];
+    jsonKeys: string[];
+  };
+  runtimeCapture: {
+    detail: string;
+    lastOutput: string;
+  };
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AcceptanceRepairPlan {
+  id: string;
+  missionId: string;
+  title: string;
+  owner: AgentName;
+  status: "proposed" | "queued" | "applied";
+  failureFingerprint: string;
+  failedCheckIds: string[];
+  failurePackIds: string[];
+  summary: string;
+  prompt: string;
+  routeReason: string;
+  routeStrategy: RouteStrategy;
+  routeConfidence: number;
+  claimedPaths: string[];
+  likelyOwners: AgentName[];
+  likelyTaskIds: string[];
+  repairFocus: string[];
+  evidence: string[];
+  createdAt: string;
+  updatedAt: string;
+  queuedTaskId: string | null;
+}
+
 export interface AcceptancePack {
   id: string;
   summary: string;
   criteria: string[];
   checks: AcceptanceCheck[];
+  failurePacks: AcceptanceFailurePack[];
+  repairPlans: AcceptanceRepairPlan[];
   status: AcceptancePackStatus;
   createdAt: string;
   updatedAt: string;
@@ -508,6 +601,8 @@ export interface MissionPolicy {
   autonomyLevel: MissionAutonomyLevel;
   approvalMode: "standard" | "approve_all";
   retryBudget: number;
+  operatorAttentionBudget: number;
+  escalationPolicy: "strict" | "balanced" | "aggressive";
   verificationMode: MissionVerificationMode;
   landPolicy: MissionLandPolicy;
   gatePolicy: string[];
@@ -530,6 +625,50 @@ export interface MissionHealth {
   state: MissionHealthState;
   reasons: string[];
   updatedAt: string;
+}
+
+export interface MissionConfidence {
+  score: number;
+  state: "high" | "medium" | "low";
+  canAutopilot: boolean;
+  blockers: string[];
+  warnings: string[];
+  strengths: string[];
+  updatedAt: string;
+}
+
+export interface MissionSpecRevision {
+  id: string;
+  version: number;
+  summary: string;
+  prompt: string;
+  sourceTaskId: string | null;
+  createdAt: string;
+}
+
+export interface MissionSimulationIssue {
+  id: string;
+  kind: "coordination" | "verification" | "seriality" | "attention" | "overlap";
+  severity: "low" | "medium" | "high";
+  title: string;
+  detail: string;
+}
+
+export interface MissionSimulation {
+  generatedAt: string;
+  attentionCost: number;
+  attentionBudget: number;
+  gatePressure: number;
+  serialityScore: number;
+  contractRequestCount: number;
+  escalationPressure: "low" | "medium" | "high";
+  escalationReasons: string[];
+  autopilotViable: boolean;
+  estimatedParallelism: number;
+  verificationCoverage: "thin" | "partial" | "strong";
+  contractCoverage: "missing" | "partial" | "explicit";
+  issues: MissionSimulationIssue[];
+  recommendations: string[];
 }
 
 export interface MissionCheckpoint {
@@ -569,14 +708,19 @@ export interface Mission {
   rootTaskId: string | null;
   activeTaskIds: string[];
   autopilotEnabled: boolean;
+  phase?: MissionPhase;
   spec?: MissionSpec;
+  specRevisions?: MissionSpecRevision[];
   contract?: MissionContract;
   blueprint?: MissionBlueprint;
   policy?: MissionPolicy;
   risks?: MissionRisk[];
   anchors?: MissionAnchor[];
   health?: MissionHealth;
+  simulation?: MissionSimulation;
   appliedPatternIds?: string[];
+  receiptIds?: string[];
+  contractIds?: string[];
   acceptance: AcceptancePack;
   checkpoints: MissionCheckpoint[];
   brainEntryIds: string[];
@@ -643,6 +787,35 @@ export interface PatternTemplate {
   commands: string[];
   antiPatternSignals: string[];
   confidence: number;
+}
+
+export interface PatternBenchmark {
+  templateId: string;
+  label: string;
+  kind: PatternKind;
+  score: number;
+  successCount: number;
+  antiPatternCount: number;
+  deliveryCount: number;
+  repoCount: number;
+  averageConfidence: number;
+  commands: string[];
+  acceptanceCriteria: string[];
+  antiPatternSignals: string[];
+}
+
+export interface PatternComposition {
+  prompt: string;
+  templateIds: string[];
+  labels: string[];
+  stacks: string[];
+  nodeKinds: string[];
+  commands: string[];
+  acceptanceCriteria: string[];
+  antiPatternSignals: string[];
+  conflicts: string[];
+  benchmarkScore: number;
+  composedPrompt: string;
 }
 
 export interface PatternConstellation {
@@ -716,10 +889,193 @@ export interface MissionPlaybackFrame {
     | "attempt"
     | "progress"
     | "acceptance"
+    | "receipt"
+    | "contract"
     | "landing";
   title: string;
   detail: string;
   taskId: string | null;
+}
+
+export interface MissionReceipt {
+  id: string;
+  missionId: string;
+  taskId: string;
+  owner: AgentName | "router";
+  nodeKind: MissionNodeKind | null;
+  outcome: "completed" | "failed" | "blocked";
+  title: string;
+  summary: string;
+  changedPaths: string[];
+  commands: string[];
+  verificationEvidence: string[];
+  assumptions: string[];
+  followUps: string[];
+  risks: string[];
+  createdAt: string;
+}
+
+export interface MissionRecoveryAction {
+  id: string;
+  kind:
+    | "resolve_approvals"
+    | "restore_provider"
+    | "retry_task"
+    | "resume_autopilot"
+    | "run_verification"
+    | "review_contracts"
+    | "review_follow_ups"
+    | "review_repairs"
+    | "resolve_overlap"
+    | "select_shadow"
+    | "inspect_failures";
+  title: string;
+  detail: string;
+  command: string | null;
+  taskId: string | null;
+  safeToAutoApply: boolean;
+  recommended: boolean;
+}
+
+export interface MissionRecoveryPlan {
+  missionId: string;
+  generatedAt: string;
+  status: "clear" | "waiting" | "actionable";
+  summary: string;
+  blockers: string[];
+  actions: MissionRecoveryAction[];
+}
+
+export interface MissionDigest {
+  missionId: string;
+  title: string;
+  phase: MissionPhase;
+  headline: string;
+  confidence: MissionConfidence;
+  summary: string[];
+  blockers: string[];
+  warnings: string[];
+  nextActions: string[];
+  observability: {
+    totalTasks: number;
+    completedTasks: number;
+    runningTasks: number;
+    pendingTasks: number;
+    blockedTasks: number;
+    failedTasks: number;
+    retriesUsed: number;
+    activeRepairTasks: number;
+    changedPaths: number;
+    activeOwners: AgentName[];
+    criticalPath: string[];
+    nextReadyNodes: Array<{
+      key: string;
+      title: string;
+      owner: AgentName;
+    }>;
+  } | null;
+  recentReceipts: MissionReceipt[];
+  openContracts: AgentContract[];
+  activeRepairPlans: AcceptanceRepairPlan[];
+  failurePacks: AcceptanceFailurePack[];
+  recoveryPlan: MissionRecoveryPlan;
+  generatedAt: string;
+}
+
+export interface MissionPostmortem {
+  missionId: string;
+  outcome: "landed" | "failed" | "active";
+  summary: string;
+  wins: string[];
+  pains: string[];
+  followUpDebt: string[];
+  reinforcedPatterns: string[];
+  antiPatterns: string[];
+  receiptHighlights: string[];
+  generatedAt: string;
+}
+
+export interface MissionMorningBrief {
+  missionId: string;
+  title: string;
+  generatedAt: string;
+  windowHours: number;
+  headline: string;
+  summary: string[];
+  completedTasks: Array<{
+    taskId: string;
+    owner: AgentName | "router";
+    title: string;
+    summary: string;
+    finishedAt: string;
+  }>;
+  failedTasks: Array<{
+    taskId: string;
+    owner: AgentName | "router";
+    title: string;
+    summary: string;
+    finishedAt: string;
+  }>;
+  resolvedContracts: AgentContract[];
+  openContracts: AgentContract[];
+  recentReceipts: MissionReceipt[];
+  qualityCourt: MissionAuditReport | null;
+  firstActions: string[];
+}
+
+export interface MissionObjection {
+  id: string;
+  missionId: string;
+  severity: "critical" | "major" | "minor";
+  kind:
+    | "acceptance"
+    | "contract"
+    | "follow_up"
+    | "overlap"
+    | "verification"
+    | "receipt"
+    | "risk"
+    | "simulation";
+  title: string;
+  detail: string;
+  evidence: string[];
+  likelyTaskIds: string[];
+  suggestedAction: string | null;
+}
+
+export interface MissionAuditReport {
+  missionId: string;
+  verdict: "approved" | "warn" | "blocked";
+  score: number;
+  summary: string;
+  approvals: string[];
+  objections: MissionObjection[];
+  receiptsReviewed: number;
+  checksReviewed: number;
+  contractsReviewed: number;
+  generatedAt: string;
+}
+
+export interface AgentContract {
+  id: string;
+  missionId: string;
+  sourceTaskId: string;
+  sourceMessageId: string | null;
+  sourceAgent: AgentName;
+  targetAgent: AgentName | "operator";
+  kind: AgentContractKind;
+  status: AgentContractStatus;
+  title: string;
+  detail: string;
+  requiredArtifacts: string[];
+  acceptanceExpectations: string[];
+  urgency: "low" | "normal" | "high";
+  dependencyImpact: "blocking" | "sidecar";
+  claimedPaths: string[];
+  createdAt: string;
+  updatedAt: string;
+  resolvedAt: string | null;
+  resolvedByTaskId: string | null;
 }
 
 export interface TaskProgressEntry {
@@ -805,6 +1161,8 @@ export interface SessionRecord {
   tasks: TaskSpec[];
   plans: ExecutionPlan[];
   missions: Mission[];
+  receipts?: MissionReceipt[];
+  contracts?: AgentContract[];
   brain: BrainEntry[];
   providerCapabilities: ProviderCapabilityManifest[];
   peerMessages: PeerMessage[];

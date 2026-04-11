@@ -1,7 +1,9 @@
 import process from "node:process";
 import {
   acceptanceFailureFingerprint,
+  buildAcceptanceFailurePacks,
   buildAcceptanceRepairPrompt,
+  compileAcceptanceRepairPlans,
   evaluateAcceptanceCheck,
   failingAcceptanceChecks,
   planAcceptanceRepairs,
@@ -104,10 +106,18 @@ export async function verifyMissionAcceptanceById(
   }
 
   refreshMissionAcceptance(mission);
-  if (mission.acceptance.status === "failed") {
-    await captureMissionAntiPatterns(paths, session, mission);
+  if (mission.acceptance.status !== "failed") {
+    mission.acceptance.failurePacks = [];
+    mission.acceptance.repairPlans = (mission.acceptance.repairPlans ?? []).map((plan) => ({
+      ...plan,
+      status: "applied",
+      updatedAt: new Date().toISOString()
+    }));
   }
-  if (mission.acceptance.status === "failed" && mission.autopilotEnabled) {
+  if (mission.acceptance.status === "failed") {
+    const failurePacks = buildAcceptanceFailurePacks(mission);
+    mission.acceptance.failurePacks = failurePacks;
+    await captureMissionAntiPatterns(paths, session, mission);
     const failureFingerprint = acceptanceFailureFingerprint(mission);
     const openRepairFingerprints = new Set(session.tasks
       .filter((task) => {
@@ -137,20 +147,35 @@ export async function verifyMissionAcceptanceById(
         task.routeMetadata?.failureFingerprint === failureFingerprint
       );
     });
-
-    if (!hasOpenRepair && failingAcceptanceChecks(mission).length > 0) {
-      const repairPrompt = buildAcceptanceRepairPrompt(mission);
-      const repairPlans = planAcceptanceRepairs(
-        session,
-        mission,
-        previewRouteDecision(repairPrompt, session.config, session)
+    const routePlans = planAcceptanceRepairs(
+      session,
+      mission,
+      previewRouteDecision(buildAcceptanceRepairPrompt(mission), session.config, session)
+    );
+    const compiledRepairPlans = compileAcceptanceRepairPlans(mission, routePlans, failurePacks);
+    for (const plan of compiledRepairPlans) {
+      const existingTask = session.tasks.find((task) =>
+        task.missionId === mission.id &&
+        (task.status === "pending" || task.status === "running" || task.status === "blocked") &&
+        task.routeMetadata?.source === "acceptance-repair" &&
+        task.routeMetadata?.failureFingerprint === plan.failureFingerprint &&
+        task.owner === plan.owner
       );
-      const queuedRepairTasks = repairPlans
+      if (existingTask) {
+        plan.status = "queued";
+        plan.queuedTaskId = existingTask.id;
+        plan.updatedAt = new Date().toISOString();
+      }
+    }
+    mission.acceptance.repairPlans = compiledRepairPlans;
+
+    if (mission.autopilotEnabled && !hasOpenRepair && failingAcceptanceChecks(mission).length > 0) {
+      const queuedRepairTasks = routePlans
         .filter((plan) => !openRepairFingerprints.has(plan.failureFingerprint))
         .map((plan, index) => {
           const taskId = `task-acceptance-repair-${Date.now()}-${index + 1}`;
           const titleSuffix =
-            repairPlans.length > 1 ? ` (${plan.owner})` : "";
+            routePlans.length > 1 ? ` (${plan.owner})` : "";
           const task = buildAdHocTask(plan.owner, plan.prompt, taskId, {
             missionId: mission.id,
             title: `Repair acceptance failures for ${mission.title}${titleSuffix}`,
@@ -166,7 +191,7 @@ export async function verifyMissionAcceptanceById(
               source: "acceptance-repair",
               failureFingerprint: plan.failureFingerprint,
               failedChecks: plan.failedChecks.map((check) => check.id),
-              groupedRepair: repairPlans.length > 1
+              groupedRepair: routePlans.length > 1
             },
             claimedPaths:
               plan.claimedPaths.length > 0
@@ -176,6 +201,14 @@ export async function verifyMissionAcceptanceById(
                     .filter((value): value is string => Boolean(value))
           });
           session.tasks.push(task);
+          const compiledPlan = mission.acceptance.repairPlans.find((item) =>
+            item.failureFingerprint === plan.failureFingerprint && item.owner === plan.owner
+          );
+          if (compiledPlan) {
+            compiledPlan.status = "queued";
+            compiledPlan.queuedTaskId = task.id;
+            compiledPlan.updatedAt = new Date().toISOString();
+          }
           return task;
         });
 

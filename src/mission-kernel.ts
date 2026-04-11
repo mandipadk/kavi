@@ -249,10 +249,26 @@ function buildMissionPolicy(session: SessionRecord, spec: MissionSpec): MissionP
     !gatePolicy.includes("operator_review") &&
     !gatePolicy.includes("integration") &&
     !gatePolicy.includes("risk");
+  const operatorAttentionBudget =
+    spec.repoShape === "greenfield"
+      ? 8
+      : spec.workstreamKinds.length >= 3
+        ? 7
+        : spec.workstreamKinds.length <= 1
+          ? 4
+          : 6;
+  const escalationPolicy =
+    gatePolicy.includes("risk") || spec.workstreamKinds.includes("infra")
+      ? "strict"
+      : spec.repoShape === "greenfield" || spec.workstreamKinds.length >= 3
+        ? "balanced"
+        : "aggressive";
   return {
     autonomyLevel,
     approvalMode: session.fullAccessMode ? "approve_all" : "standard",
     retryBudget: spec.workstreamKinds.includes("infra") || spec.workstreamKinds.includes("backend") ? 2 : 1,
+    operatorAttentionBudget,
+    escalationPolicy,
     verificationMode: spec.workstreamKinds.includes("tests") || spec.requestedDeliverables.includes("api")
       ? "strict"
       : "standard",

@@ -8,6 +8,8 @@ import type {
   BrainEntry,
   LandReport,
   Mission,
+  PatternBenchmark,
+  PatternComposition,
   PatternConstellation,
   PatternEntry,
   PatternTemplate,
@@ -54,6 +56,35 @@ function tokenize(value: string): string[] {
 
 function unique(values: string[]): string[] {
   return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
+}
+
+function normalizePortablePatternCommand(command: string): string | null {
+  const normalized = command.replaceAll(/\s+/g, " ").trim();
+  if (!normalized) {
+    return null;
+  }
+
+  if (/\.kavi\/runtime\/acceptance\//i.test(normalized)) {
+    return "kavi verify latest";
+  }
+
+  if (/\.kavi\/runtime\//i.test(normalized)) {
+    return null;
+  }
+
+  if (/(^|[\s=('"])(\/private\/tmp|\/tmp|\/Users|\/home|\/var\/folders)\//.test(normalized)) {
+    return null;
+  }
+
+  return normalized;
+}
+
+function normalizePortablePatternCommands(commands: string[]): string[] {
+  return unique(
+    commands
+      .map((command) => normalizePortablePatternCommand(command))
+      .filter((command): command is string => Boolean(command))
+  );
 }
 
 function countValues(values: string[]): Array<{ value: string; count: number }> {
@@ -252,12 +283,18 @@ function patternFingerprint(entry: Pick<PatternEntry, "title" | "tags" | "source
 function commandHints(report: LandReport): string[] {
   const hints = new Set<string>();
   if (report.validationCommand.trim()) {
-    hints.add(report.validationCommand.trim());
+    const normalized = normalizePortablePatternCommand(report.validationCommand);
+    if (normalized) {
+      hints.add(normalized);
+    }
   }
 
   for (const command of report.commandsRun) {
-    if (/npm test|pnpm test|yarn test|go test|pytest|cargo test|npm run build|pnpm build|yarn build/i.test(command)) {
-      hints.add(command.trim());
+    if (/npm test|pnpm test|yarn test|go test|pytest|cargo test|npm run build|pnpm build|yarn build|kavi verify/i.test(command)) {
+      const normalized = normalizePortablePatternCommand(command);
+      if (normalized) {
+        hints.add(normalized);
+      }
     }
   }
 
@@ -479,6 +516,18 @@ export interface RankedPatternTemplate {
   reasons: string[];
 }
 
+export interface PatternStudio {
+  prompt: string;
+  composition: PatternComposition;
+  rankedTemplates: RankedPatternTemplate[];
+  selectedBenchmarks: PatternBenchmark[];
+  relatedRepoClusters: PatternConstellation["repoClusters"];
+  relatedTemplateLinks: PatternConstellation["templateLinks"];
+  antiPatternHotspots: PatternConstellation["antiPatternHotspots"];
+  topRepos: PatternConstellation["topRepos"];
+  topStacks: PatternConstellation["topStacks"];
+}
+
 export async function searchPatterns(
   paths: AppPaths,
   query: string,
@@ -599,7 +648,7 @@ export function buildPatternTemplatesFromEntries(patterns: PatternEntry[]): Patt
         patternIds: entries.map((entry) => entry.id),
         repoRoots: unique(entries.map((entry) => entry.sourceRepoRoot)).slice(0, 10),
         acceptanceCriteria: unique(entries.flatMap((entry) => entry.acceptanceCriteria ?? [])).slice(0, 12),
-        commands: unique(entries.flatMap((entry) => entry.commands)).slice(0, 12),
+        commands: normalizePortablePatternCommands(entries.flatMap((entry) => entry.commands)).slice(0, 12),
         antiPatternSignals: unique(entries.flatMap((entry) => entry.antiPatternSignals ?? [])).slice(0, 12),
         confidence: Number(confidence.toFixed(2))
       } satisfies PatternTemplate;
@@ -630,6 +679,9 @@ function scoreTemplate(template: PatternTemplate, query: string): number {
   }
   if (normalizeText(template.label).includes(normalizeText(query))) {
     score += 4;
+  }
+  if (template.kind === "anti_pattern") {
+    score -= 8;
   }
   return score;
 }
@@ -671,6 +723,25 @@ export async function rankPatternTemplates(
     .slice(0, Math.max(1, limit));
 }
 
+function collectRelevantAntiPatternSignals(
+  ranked: RankedPatternTemplate[],
+  selectedTemplates: PatternTemplate[]
+): string[] {
+  const selectedStacks = unique(selectedTemplates.flatMap((template) => template.stacks));
+  const selectedNodeKinds = unique(selectedTemplates.flatMap((template) => template.nodeKinds));
+  return unique(
+    ranked
+      .filter((item) => item.template.kind === "anti_pattern")
+      .filter((item) =>
+        selectedTemplates.length === 0 ||
+        overlapValues(item.template.stacks, selectedStacks).length > 0 ||
+        overlapValues(item.template.nodeKinds, selectedNodeKinds).length > 0 ||
+        item.reasons.includes("anti-pattern-signal")
+      )
+      .flatMap((item) => item.template.antiPatternSignals)
+  ).slice(0, 16);
+}
+
 export function buildPatternTemplatePrompt(template: PatternTemplate, prompt: string): string {
   return [
     prompt.trim(),
@@ -684,6 +755,243 @@ export function buildPatternTemplatePrompt(template: PatternTemplate, prompt: st
     `Acceptance defaults: ${template.acceptanceCriteria.join(" | ") || "-"}`,
     `Anti-pattern signals: ${template.antiPatternSignals.join(" | ") || "-"}`
   ].filter(Boolean).join("\n\n");
+}
+
+export async function buildPatternBenchmarks(paths: AppPaths): Promise<PatternBenchmark[]> {
+  const patterns = await listPatterns(paths);
+  const templates = buildPatternTemplatesFromEntries(patterns);
+  const patternById = new Map(patterns.map((entry) => [entry.id, entry] as const));
+
+  return templates
+    .map((template) => {
+      const supportingEntries = template.patternIds
+        .map((patternId) => patternById.get(patternId))
+        .filter((entry): entry is PatternEntry => Boolean(entry));
+      const antiPatternEntries = patterns.filter((entry) =>
+        entry.kind === "anti_pattern" &&
+        (
+          overlapValues(template.stacks, deriveStackSignals(entry)).length > 0 ||
+          overlapValues(template.nodeKinds, deriveNodeKinds(entry)).length > 0 ||
+          overlapValues(template.repoRoots, [entry.sourceRepoRoot]).length > 0
+        )
+      );
+      const successCount = supportingEntries.filter((entry) => entry.kind !== "anti_pattern").length;
+      const antiPatternCount = antiPatternEntries.length;
+      const deliveryCount = supportingEntries.filter((entry) => entry.kind === "delivery").length;
+      const repoCount = template.repoRoots.length;
+      const averageConfidence = Number(
+        (
+          supportingEntries.reduce((sum, entry) => sum + (entry.confidence ?? 0.65), 0) /
+          Math.max(1, supportingEntries.length)
+        ).toFixed(2)
+      );
+      const score = Math.max(
+        0,
+        Math.round(
+          successCount * 7 +
+          deliveryCount * 5 +
+          repoCount * 2 +
+          averageConfidence * 20 -
+          antiPatternCount * 6
+        )
+      );
+      return {
+        templateId: template.id,
+        label: template.label,
+        kind: template.kind,
+        score,
+        successCount,
+        antiPatternCount,
+        deliveryCount,
+        repoCount,
+        averageConfidence,
+        commands: template.commands,
+        acceptanceCriteria: template.acceptanceCriteria,
+        antiPatternSignals: unique([
+          ...template.antiPatternSignals,
+          ...antiPatternEntries.flatMap((entry) => entry.antiPatternSignals ?? [])
+        ]).slice(0, 16)
+      } satisfies PatternBenchmark;
+    })
+    .sort((left, right) => right.score - left.score || left.label.localeCompare(right.label));
+}
+
+function composePatternTemplatePrompt(
+  templates: PatternTemplate[],
+  prompt: string,
+  benchmarkScore: number,
+  conflicts: string[],
+  antiPatternSignals: string[]
+): string {
+  const combinedStacks = unique(templates.flatMap((template) => template.stacks));
+  const combinedNodeKinds = unique(templates.flatMap((template) => template.nodeKinds));
+  const combinedCommands = unique(templates.flatMap((template) => template.commands));
+  const combinedAcceptance = unique(templates.flatMap((template) => template.acceptanceCriteria));
+  return [
+    prompt.trim(),
+    "Composed portfolio pattern context selected by Kavi:",
+    `Templates: ${templates.map((template) => template.label).join(" | ")}`,
+    `Benchmark score: ${benchmarkScore}`,
+    `Stacks: ${combinedStacks.join(", ") || "-"}`,
+    `Node kinds: ${combinedNodeKinds.join(", ") || "-"}`,
+    `Helpful commands: ${combinedCommands.join(" | ") || "-"}`,
+    `Acceptance defaults: ${combinedAcceptance.join(" | ") || "-"}`,
+    `Anti-pattern signals: ${antiPatternSignals.join(" | ") || "-"}`,
+    conflicts.length > 0 ? `Conflicts to reconcile: ${conflicts.join(" | ")}` : null
+  ].filter(Boolean).join("\n\n");
+}
+
+function selectDefaultPatternComposition(ranked: RankedPatternTemplate[]): PatternTemplate[] {
+  const positive = ranked.filter((item) => item.template.kind !== "anti_pattern");
+  if (positive.length === 0) {
+    return [];
+  }
+
+  const primary = positive.find((item) => item.template.kind === "architecture") ?? positive[0]!;
+  const selected: PatternTemplate[] = [primary.template];
+  const usedKinds = new Set<string>([primary.template.kind]);
+
+  for (const item of positive) {
+    if (item.template.id === primary.template.id) {
+      continue;
+    }
+    if (usedKinds.has(item.template.kind)) {
+      continue;
+    }
+    selected.push(item.template);
+    usedKinds.add(item.template.kind);
+    if (selected.length >= 3) {
+      break;
+    }
+  }
+
+  return selected;
+}
+
+export async function composePatternTemplates(
+  paths: AppPaths,
+  prompt: string,
+  templateIds: string[] = []
+): Promise<PatternComposition> {
+  const templates = await buildPatternTemplates(paths);
+  const rankedTemplates = await rankPatternTemplates(paths, prompt, 8);
+  const selectedTemplates =
+    templateIds.length > 0
+      ? templateIds
+          .map((templateId) => templates.find((template) => template.id === templateId) ?? null)
+          .filter((template): template is PatternTemplate => Boolean(template))
+      : selectDefaultPatternComposition(rankedTemplates);
+  const dedupedTemplates = unique(selectedTemplates.map((template) => template.id))
+    .map((templateId) => selectedTemplates.find((template) => template.id === templateId)!)
+    .filter(Boolean);
+  const relevantAntiPatternSignals = collectRelevantAntiPatternSignals(rankedTemplates, dedupedTemplates);
+  if (dedupedTemplates.length === 0) {
+    return {
+      prompt,
+      templateIds: [],
+      labels: [],
+      stacks: [],
+      nodeKinds: [],
+      commands: [],
+      acceptanceCriteria: [],
+      antiPatternSignals: relevantAntiPatternSignals,
+      conflicts: [],
+      benchmarkScore: 0,
+      composedPrompt: prompt.trim()
+    };
+  }
+
+  const stacks = unique(dedupedTemplates.flatMap((template) => template.stacks));
+  const nodeKinds = unique(dedupedTemplates.flatMap((template) => template.nodeKinds));
+  const commands = normalizePortablePatternCommands(dedupedTemplates.flatMap((template) => template.commands));
+  const acceptanceCriteria = unique(dedupedTemplates.flatMap((template) => template.acceptanceCriteria));
+  const antiPatternSignals = unique([
+    ...dedupedTemplates.flatMap((template) => template.antiPatternSignals),
+    ...relevantAntiPatternSignals
+  ]);
+  const conflicts = unique([
+    dedupedTemplates.filter((template) => template.kind === "architecture").length > 1
+      ? "Selected templates mix multiple architecture baselines."
+      : "",
+    stacks.includes("go") && stacks.includes("python")
+      ? "Templates mix multiple backend language defaults (go and python)."
+      : "",
+    stacks.includes("frontend") && !nodeKinds.includes("frontend")
+      ? "Frontend stack signals are present without a frontend node kind."
+      : "",
+    dedupedTemplates.some((template) =>
+      dedupedTemplates.some((other) =>
+        template.id !== other.id &&
+        overlapValues(template.antiPatternSignals, [...other.stacks, ...other.nodeKinds]).length > 0
+      )
+    )
+      ? "One template's anti-pattern signals overlap another template's preferred stacks or node kinds."
+      : ""
+  ]);
+  const benchmarks = await buildPatternBenchmarks(paths);
+  const benchmarkScore = dedupedTemplates.reduce((sum, template) => {
+    const benchmark = benchmarks.find((item) => item.templateId === template.id);
+    return sum + (benchmark?.score ?? Math.round(template.confidence * 10));
+  }, 0);
+
+  return {
+    prompt,
+    templateIds: dedupedTemplates.map((template) => template.id),
+    labels: dedupedTemplates.map((template) => template.label),
+    stacks,
+    nodeKinds,
+    commands,
+    acceptanceCriteria,
+    antiPatternSignals,
+    conflicts,
+    benchmarkScore,
+    composedPrompt: composePatternTemplatePrompt(
+      dedupedTemplates,
+      prompt,
+      benchmarkScore,
+      conflicts,
+      antiPatternSignals
+    )
+  };
+}
+
+export async function buildPatternStudio(
+  paths: AppPaths,
+  prompt: string,
+  templateIds: string[] = []
+): Promise<PatternStudio> {
+  const [composition, rankedTemplates, benchmarks, constellation] = await Promise.all([
+    composePatternTemplates(paths, prompt, templateIds),
+    rankPatternTemplates(paths, prompt, 8),
+    buildPatternBenchmarks(paths),
+    buildPatternConstellation(paths)
+  ]);
+
+  const selectedTemplateIds = new Set(composition.templateIds);
+  const selectedBenchmarks = benchmarks.filter((benchmark) => selectedTemplateIds.has(benchmark.templateId));
+  const relatedTemplateLinks = constellation.templateLinks.filter(
+    (link) => selectedTemplateIds.has(link.leftTemplateId) || selectedTemplateIds.has(link.rightTemplateId)
+  );
+  const selectedRepoRoots = new Set(
+    constellation.templates
+      .filter((template) => selectedTemplateIds.has(template.id))
+      .flatMap((template) => template.repoRoots)
+  );
+  const relatedRepoClusters = constellation.repoClusters.filter((cluster) =>
+    cluster.repoRoots.some((repoRoot) => selectedRepoRoots.has(repoRoot))
+  );
+
+  return {
+    prompt: prompt.trim(),
+    composition,
+    rankedTemplates,
+    selectedBenchmarks,
+    relatedRepoClusters,
+    relatedTemplateLinks,
+    antiPatternHotspots: constellation.antiPatternHotspots,
+    topRepos: constellation.topRepos,
+    topStacks: constellation.topStacks
+  };
 }
 
 export async function captureLandingPatterns(
@@ -861,37 +1169,53 @@ export async function attachRelevantPatternsToMission(
 
   const patterns = (await rankPatterns(paths, prompt, 5)).map((item) => item.entry);
   const entries: BrainEntry[] = [];
-  const topTemplate = (await rankPatternTemplates(paths, prompt, 1))[0]?.template ?? null;
-  if (topTemplate) {
+  const composedTemplateContext = await composePatternTemplates(paths, prompt);
+  if (composedTemplateContext.templateIds.length > 0) {
     const templateEntry = addBrainEntry(session, {
       missionId,
       taskId: null,
       sourceType: "pattern",
-      category: topTemplate.kind === "anti_pattern" ? "risk" : "procedure",
+      category: "procedure",
       scope: "pattern",
-      title: `Pattern template: ${topTemplate.label}`,
+      title: `Pattern composition: ${composedTemplateContext.labels.join(" + ")}`,
       content: [
-        `Stacks: ${topTemplate.stacks.join(", ") || "-"}`,
-        `Node kinds: ${topTemplate.nodeKinds.join(", ") || "-"}`,
-        `Portfolio repos: ${topTemplate.repoRoots.join(", ") || "-"}`,
-        topTemplate.acceptanceCriteria.length > 0
-          ? `Acceptance defaults: ${topTemplate.acceptanceCriteria.join(" | ")}`
+        `Templates: ${composedTemplateContext.labels.join(" | ")}`,
+        `Stacks: ${composedTemplateContext.stacks.join(", ") || "-"}`,
+        `Node kinds: ${composedTemplateContext.nodeKinds.join(", ") || "-"}`,
+        composedTemplateContext.acceptanceCriteria.length > 0
+          ? `Acceptance defaults: ${composedTemplateContext.acceptanceCriteria.join(" | ")}`
           : null,
-        topTemplate.antiPatternSignals.length > 0
-          ? `Anti-pattern signals: ${topTemplate.antiPatternSignals.join(" | ")}`
+        composedTemplateContext.commands.length > 0
+          ? `Helpful commands: ${composedTemplateContext.commands.join(" | ")}`
+          : null,
+        composedTemplateContext.antiPatternSignals.length > 0
+          ? `Anti-pattern signals: ${composedTemplateContext.antiPatternSignals.join(" | ")}`
+          : null,
+        composedTemplateContext.conflicts.length > 0
+          ? `Conflicts: ${composedTemplateContext.conflicts.join(" | ")}`
           : null
       ].filter(Boolean).join("\n"),
-      tags: [...topTemplate.stacks, ...topTemplate.nodeKinds, ...topTemplate.antiPatternSignals],
-      confidence: topTemplate.confidence,
+      tags: [
+        ...composedTemplateContext.stacks,
+        ...composedTemplateContext.nodeKinds,
+        ...composedTemplateContext.antiPatternSignals
+      ],
+      confidence: Math.max(0.5, Math.min(0.98, composedTemplateContext.benchmarkScore / 100)),
       freshness: "recent",
-      evidence: [...topTemplate.repoRoots],
-      commands: [...topTemplate.commands],
+      evidence: [...composedTemplateContext.templateIds],
+      commands: [...composedTemplateContext.commands],
       pinned: false
     });
     if (!mission.brainEntryIds.includes(templateEntry.id)) {
       mission.brainEntryIds.push(templateEntry.id);
     }
     entries.push(templateEntry);
+    mission.appliedPatternIds = Array.isArray(mission.appliedPatternIds) ? mission.appliedPatternIds : [];
+    for (const templateId of composedTemplateContext.templateIds) {
+      if (!mission.appliedPatternIds.includes(templateId)) {
+        mission.appliedPatternIds.push(templateId);
+      }
+    }
   }
   for (const pattern of patterns) {
     const entry = addBrainEntry(session, {

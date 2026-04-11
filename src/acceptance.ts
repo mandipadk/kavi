@@ -4,7 +4,16 @@ import fs from "node:fs/promises";
 import process from "node:process";
 import { fileExists, readJson } from "./fs.ts";
 import { runCommand } from "./process.ts";
-import type { AcceptanceCheck, AgentName, Mission, RouteStrategy, SessionRecord, TaskSpec } from "./types.ts";
+import type {
+  AcceptanceCheck,
+  AcceptanceFailurePack,
+  AcceptanceRepairPlan,
+  AgentName,
+  Mission,
+  RouteStrategy,
+  SessionRecord,
+  TaskSpec
+} from "./types.ts";
 
 type PackageManifest = {
   scripts?: Record<string, string>;
@@ -1416,13 +1425,14 @@ export async function synthesizeMissionAcceptanceChecks(
   );
   const changedPaths = new Set(completedTasks.flatMap((task) => task.claimedPaths));
   const changedPathList = [...changedPaths];
+  const implementationSourceFiles = sourceFiles.filter((file) => !isDocsPath(file.path));
   const frontendPaths = uniqueStrings([
     ...changedPathList.filter(isFrontendPath),
-    ...sourceFiles.filter((file) => isBrowserSurfaceContent(file.content)).map((file) => file.path)
+    ...implementationSourceFiles.filter((file) => isBrowserSurfaceContent(file.content)).map((file) => file.path)
   ]);
   const backendPaths = uniqueStrings([
     ...changedPathList.filter(isBackendPath),
-    ...sourceFiles.filter((file) => isApiSurfaceContent(file.content)).map((file) => file.path)
+    ...implementationSourceFiles.filter((file) => isApiSurfaceContent(file.content)).map((file) => file.path)
   ]);
   const readmeExists =
     changedPathList.includes("README.md") || await fileExists(path.join(repoRoot, "README.md"));
@@ -1439,7 +1449,7 @@ export async function synthesizeMissionAcceptanceChecks(
         filePath.includes("contract") ||
         filePath.includes("api")
       ),
-      ...sourceFiles.filter((file) => isContractBearingContent(file.content)).map((file) => file.path)
+      ...implementationSourceFiles.filter((file) => isContractBearingContent(file.content)).map((file) => file.path)
     ].slice(0, 12)
   );
   const hasContractSignals =
@@ -1778,6 +1788,61 @@ export function explainMissionAcceptanceFailures(mission: Mission): AcceptanceFa
   return failingAcceptanceChecks(mission).map((check) => explainAcceptanceFailure(check));
 }
 
+export function buildAcceptanceFailurePack(
+  mission: Mission,
+  check: AcceptanceCheck
+): AcceptanceFailurePack {
+  const explanation = explainAcceptanceFailure(check);
+  const timestamp = new Date().toISOString();
+  return {
+    id: `failure-${randomUUID()}`,
+    missionId: mission.id,
+    checkId: check.id,
+    kind: check.kind,
+    title: check.title,
+    summary: explanation.summary,
+    expected: explanation.expected,
+    observed: explanation.observed,
+    evidence: explanation.evidence,
+    likelyOwners: explanation.likelyOwners,
+    likelyTaskIds: explanation.likelyTaskIds,
+    attribution: explanation.attribution,
+    repairFocus: explanation.repairFocus,
+    command: check.command ?? null,
+    harnessPath: check.harnessPath ?? null,
+    serverCommand: check.serverCommand ?? null,
+    request: {
+      method: check.method ?? null,
+      urlPath: check.urlPath ?? null,
+      routeCandidates: uniqueStrings(check.routeCandidates ?? []),
+      headers: { ...(check.requestHeaders ?? {}) },
+      body: check.requestBody ?? null,
+      selector: check.selector ?? null,
+      selectorCandidates: uniqueStrings(check.selectorCandidates ?? [])
+    },
+    expectedSignals: {
+      title: check.expectedTitle ?? null,
+      status: typeof check.expectedStatus === "number" ? check.expectedStatus : null,
+      contentType: check.expectedContentType ?? null,
+      text: uniqueStrings(check.expectedText ?? []),
+      jsonKeys: uniqueStrings(check.expectedJsonKeys ?? [])
+    },
+    runtimeCapture: {
+      detail: check.detail,
+      lastOutput: check.lastOutput ?? ""
+    },
+    createdAt: timestamp,
+    updatedAt: timestamp
+  };
+}
+
+export function buildAcceptanceFailurePacks(
+  mission: Mission,
+  checks: AcceptanceCheck[] = failingAcceptanceChecks(mission)
+): AcceptanceFailurePack[] {
+  return checks.map((check) => buildAcceptanceFailurePack(mission, check));
+}
+
 export function buildAcceptanceRepairPrompt(
   mission: Mission,
   checks: AcceptanceCheck[] = failingAcceptanceChecks(mission)
@@ -1840,6 +1905,42 @@ export interface AcceptanceRepairTaskPlan extends AcceptanceRepairRoutePlan {
   failedChecks: AcceptanceCheck[];
   failureFingerprint: string;
   prompt: string;
+}
+
+export function compileAcceptanceRepairPlans(
+  mission: Mission,
+  repairTaskPlans: AcceptanceRepairTaskPlan[],
+  failurePacks: AcceptanceFailurePack[]
+): AcceptanceRepairPlan[] {
+  const createdAt = new Date().toISOString();
+  return repairTaskPlans.map((plan) => {
+    const matchingPacks = failurePacks.filter((pack) =>
+      plan.failedChecks.some((check) => check.id === pack.checkId)
+    );
+    return {
+      id: `repair-plan-${randomUUID()}`,
+      missionId: mission.id,
+      title: `Repair plan for ${plan.owner}`,
+      owner: plan.owner,
+      status: "proposed",
+      failureFingerprint: plan.failureFingerprint,
+      failedCheckIds: plan.failedChecks.map((check) => check.id),
+      failurePackIds: matchingPacks.map((pack) => pack.id),
+      summary: plan.failedChecks.map((check) => check.title).join(" | "),
+      prompt: plan.prompt,
+      routeReason: plan.routeReason,
+      routeStrategy: plan.routeStrategy,
+      routeConfidence: plan.routeConfidence,
+      claimedPaths: uniqueStrings(plan.claimedPaths),
+      likelyOwners: uniqueStrings(matchingPacks.flatMap((pack) => pack.likelyOwners)) as AgentName[],
+      likelyTaskIds: uniqueStrings(matchingPacks.flatMap((pack) => pack.likelyTaskIds)),
+      repairFocus: uniqueStrings(matchingPacks.flatMap((pack) => pack.repairFocus)),
+      evidence: uniqueStrings(matchingPacks.flatMap((pack) => pack.evidence)),
+      createdAt,
+      updatedAt: createdAt,
+      queuedTaskId: null
+    };
+  });
 }
 
 export async function evaluateAcceptanceCheck(

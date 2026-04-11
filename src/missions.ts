@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { buildMissionSimulation, computeMissionPhase } from "./mission-control.ts";
 import { compileMissionPrompt, computeMissionHealth } from "./mission-kernel.ts";
 import { nowIso } from "./paths.ts";
 import type {
@@ -8,6 +9,7 @@ import type {
   Mission,
   MissionCheckpoint,
   MissionMode,
+  MissionSpecRevision,
   MissionStatus,
   SessionRecord,
   TaskSpec
@@ -130,6 +132,8 @@ export function createMission(
       ? compiled.contract.acceptanceCriteria
       : buildAcceptanceCriteria(prompt),
     checks: buildAcceptanceChecks(session.config),
+    failurePacks: [],
+    repairPlans: [],
     status: "pending",
     createdAt,
     updatedAt: createdAt
@@ -157,9 +161,22 @@ export function createMission(
     });
   }
 
-  return {
+  const specRevisions: MissionSpecRevision[] = [
+    {
+      id: `spec-revision-${randomUUID()}`,
+      version: 1,
+      summary: options.planningTaskId
+        ? "Initial mission spec compiled for planning."
+        : "Initial mission spec compiled for direct execution.",
+      prompt: normalizePrompt(prompt),
+      sourceTaskId: options.rootTaskId ?? options.planningTaskId ?? null,
+      createdAt
+    }
+  ];
+
+  const mission: Mission = {
     id: missionId,
-    packetVersion: 2,
+    packetVersion: 3,
     title: summarizeTitle(prompt),
     prompt: normalizePrompt(prompt),
     goal: options.goal ?? null,
@@ -178,7 +195,9 @@ export function createMission(
       (value): value is string => Boolean(value)
     ),
     autopilotEnabled: (options.mode ?? "guided_autopilot") === "guided_autopilot",
+    phase: options.planningTaskId ? "simulating" : "executing",
     spec: compiled.spec,
+    specRevisions,
     contract: compiled.contract,
     blueprint: compiled.blueprint,
     policy: {
@@ -193,7 +212,10 @@ export function createMission(
       reasons: [],
       updatedAt: createdAt
     },
+    simulation: undefined,
     appliedPatternIds: [],
+    receiptIds: [],
+    contractIds: [],
     acceptance,
     checkpoints,
     brainEntryIds: [],
@@ -201,6 +223,69 @@ export function createMission(
     updatedAt: createdAt,
     landedAt: null
   };
+  mission.simulation = buildMissionSimulation(session, mission);
+  return mission;
+}
+
+export function applyMissionBlueprint(
+  session: SessionRecord,
+  missionId: string,
+  prompt: string
+): Mission | null {
+  const mission = findMission(session, missionId);
+  if (!mission) {
+    return null;
+  }
+  if (mission.landedAt || mission.status === "landed" || mission.status === "completed") {
+    throw new Error(`Mission ${mission.id} is already landed and its blueprint cannot be changed.`);
+  }
+
+  const compiled = compileMissionPrompt(session, prompt);
+  const updatedAt = nowIso();
+  const nextVersion =
+    Math.max(0, ...(mission.specRevisions ?? []).map((revision) => revision.version)) + 1;
+
+  mission.prompt = normalizePrompt(prompt);
+  mission.title = summarizeTitle(prompt);
+  mission.spec = compiled.spec;
+  mission.contract = compiled.contract;
+  mission.blueprint = compiled.blueprint;
+  mission.risks = compiled.risks;
+  mission.anchors = compiled.anchors;
+  mission.policy = {
+    ...compiled.policy,
+    ...(mission.policy ?? {}),
+    gatePolicy: [...new Set([...(compiled.policy.gatePolicy ?? []), ...(mission.policy?.gatePolicy ?? [])])]
+  };
+  mission.acceptance.criteria = compiled.contract.acceptanceCriteria;
+  mission.acceptance.status = "pending";
+  mission.acceptance.failurePacks = [];
+  mission.acceptance.repairPlans = [];
+  mission.acceptance.updatedAt = updatedAt;
+  mission.acceptance.checks = mission.acceptance.checks.map((check) => ({
+    ...check,
+    status: "pending",
+    lastRunAt: null,
+    lastOutput: null
+  }));
+  mission.specRevisions = [
+    ...(mission.specRevisions ?? []),
+    {
+      id: `spec-revision-${randomUUID()}`,
+      version: nextVersion,
+      summary: "Operator updated the mission blueprint and spec.",
+      prompt: mission.prompt,
+      sourceTaskId: null,
+      createdAt: updatedAt
+    }
+  ];
+  mission.summary = mission.planId
+    ? "Mission blueprint was updated and the execution graph should be reviewed against the new intent."
+    : "Mission blueprint was updated and the direct execution intent changed.";
+  mission.updatedAt = updatedAt;
+  mission.simulation = buildMissionSimulation(session, mission);
+  mission.health = computeMissionHealth(session, mission);
+  return mission;
 }
 
 export function findMission(session: SessionRecord, missionId: string | null): Mission | null {
@@ -260,6 +345,8 @@ export function updateMissionPolicy(
   if (typeof patch.autopilotEnabled === "boolean") {
     mission.autopilotEnabled = patch.autopilotEnabled;
   }
+  mission.phase = computeMissionPhase(session, mission);
+  mission.simulation = buildMissionSimulation(session, mission);
   mission.updatedAt = nowIso();
   session.updatedAt = mission.updatedAt;
   return mission;
@@ -385,6 +472,8 @@ export function syncMissionStates(session: SessionRecord): void {
 
     if (mission.landedAt) {
       mission.status = "landed";
+      mission.phase = "postmortem";
+      mission.simulation = buildMissionSimulation(session, mission);
       mission.updatedAt = nowIso();
       continue;
     }
@@ -410,7 +499,9 @@ export function syncMissionStates(session: SessionRecord): void {
       mission.status = "completed";
     }
 
+    mission.phase = computeMissionPhase(session, mission);
     mission.health = computeMissionHealth(session, mission);
+    mission.simulation = buildMissionSimulation(session, mission);
     mission.updatedAt = nowIso();
   }
 }
@@ -424,6 +515,7 @@ export function markLatestMissionLanded(session: SessionRecord, targetBranch: st
   const landedAt = nowIso();
   mission.status = "landed";
   mission.landedAt = landedAt;
+  mission.phase = "postmortem";
   mission.summary = `${mission.summary}${mission.summary ? " " : ""}Landed into ${targetBranch}.`.trim();
   mission.updatedAt = landedAt;
   mission.checkpoints.push({

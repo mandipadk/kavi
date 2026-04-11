@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildMissionPlayback } from "./playback.ts";
+import { buildMissionPlayback, filterMissionPlayback } from "./playback.ts";
 import { createMission } from "./missions.ts";
 import { defaultConfig } from "./config.ts";
 import type { SessionRecord, TaskArtifact, TaskSpec } from "./types.ts";
@@ -186,4 +186,115 @@ test("buildMissionPlayback linearizes mission checkpoints, progress, and landing
   assert.equal(frames[0]?.kind, "mission");
   assert.ok(frames.some((frame) => frame.kind === "progress"));
   assert.ok(frames.some((frame) => frame.kind === "acceptance"));
+  assert.ok(frames.some((frame) => frame.title.startsWith("Quality Court:")));
+});
+
+test("filterMissionPlayback narrows frames by operator phase", () => {
+  const frames = [
+    {
+      id: "frame-spec",
+      timestamp: "2026-04-07T00:00:00.000Z",
+      kind: "mission",
+      title: "Mission created: Build a tiny CLI",
+      detail: "Mission created.",
+      taskId: null
+    },
+    {
+      id: "frame-contract",
+      timestamp: "2026-04-07T00:01:00.000Z",
+      kind: "contract",
+      title: "codex -> claude: UI refinement",
+      detail: "request_refinement | open",
+      taskId: "task-1"
+    },
+    {
+      id: "frame-repair",
+      timestamp: "2026-04-07T00:02:00.000Z",
+      kind: "checkpoint",
+      title: "Repair queued",
+      detail: "Repair queued after failed browser verification.",
+      taskId: "task-2"
+    },
+    {
+      id: "frame-exec",
+      timestamp: "2026-04-07T00:03:00.000Z",
+      kind: "receipt",
+      title: "codex receipt: Build CLI",
+      detail: "completed",
+      taskId: "task-1"
+    },
+    {
+      id: "frame-accept",
+      timestamp: "2026-04-07T00:04:00.000Z",
+      kind: "acceptance",
+      title: "Acceptance passed",
+      detail: "Mission verified.",
+      taskId: null
+    },
+    {
+      id: "frame-audit",
+      timestamp: "2026-04-07T00:05:00.000Z",
+      kind: "mission",
+      title: "Quality Court: approved",
+      detail: "No objections",
+      taskId: null
+    }
+  ] as const;
+
+  assert.equal(filterMissionPlayback([...frames], "spec").length, 1);
+  assert.equal(filterMissionPlayback([...frames], "contracts").length, 1);
+  assert.equal(filterMissionPlayback([...frames], "repair").length, 1);
+  assert.equal(filterMissionPlayback([...frames], "execution").length, 1);
+  assert.equal(filterMissionPlayback([...frames], "acceptance").length, 1);
+  assert.equal(filterMissionPlayback([...frames], "audit").length, 1);
+});
+
+test("buildMissionPlayback tolerates in-flight task artifacts without finish timestamps", () => {
+  const session = buildSession();
+  const mission = createMission(session, "Build a tiny CLI.");
+  session.missions.push(mission);
+
+  const frames = buildMissionPlayback(
+    session,
+    [
+      {
+        taskId: "task-running",
+        sessionId: session.id,
+        missionId: mission.id,
+        title: "Running task",
+        owner: "codex",
+        kind: "execution",
+        nodeKind: "backend",
+        status: "running",
+        summary: "Still working.",
+        nextRecommendation: null,
+        dependsOnTaskIds: [],
+        parentTaskId: null,
+        planId: null,
+        planNodeKey: null,
+        retryCount: 0,
+        maxRetries: 1,
+        lastFailureSummary: null,
+        routeReason: null,
+        routeStrategy: null,
+        routeConfidence: null,
+        routeMetadata: {},
+        claimedPaths: ["main.go"],
+        decisionReplay: [],
+        rawOutput: null,
+        error: null,
+        envelope: null,
+        reviewNotes: [],
+        progress: [],
+        attempts: [],
+        startedAt: "2026-04-07T00:01:00.000Z",
+        finishedAt: null
+      }
+    ],
+    mission.id,
+    null
+  );
+
+  assert.ok(frames.some((frame) => frame.title.includes("started Running task")));
+  assert.ok(!frames.some((frame) => frame.title.includes("finished Running task")));
 });

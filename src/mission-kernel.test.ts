@@ -77,6 +77,8 @@ test("compileMissionPrompt extracts a richer mission packet", () => {
   assert.equal(compiled.policy.approvalMode, "approve_all");
   assert.ok(compiled.policy.gatePolicy.includes("acceptance"));
   assert.equal(compiled.policy.autoAdvance, true);
+  assert.ok(compiled.policy.operatorAttentionBudget >= 1);
+  assert.ok(["strict", "balanced", "aggressive"].includes(compiled.policy.escalationPolicy));
   assert.ok(compiled.blueprint.personas.includes("clinician"));
   assert.ok(compiled.blueprint.serviceBoundaries.length > 0);
   assert.ok(compiled.risks.some((risk) => risk.title === "Full-stack coordination"));

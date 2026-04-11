@@ -8,6 +8,7 @@ import { resolveSessionRuntime } from "./runtime.ts";
 import type {
   AcceptanceCheck,
   AcceptancePack,
+  AgentContract,
   AgentName,
   AgentStatus,
   AppPaths,
@@ -18,6 +19,7 @@ import type {
   KaviConfig,
   Mission,
   MissionCheckpoint,
+  MissionReceipt,
   PathClaim,
   ProviderCapabilityManifest,
   ReviewNote,
@@ -74,6 +76,8 @@ export async function createSessionRecord(
     tasks: [],
     plans: [],
     missions: [],
+    receipts: [],
+    contracts: [],
     brain: [],
     providerCapabilities,
     peerMessages: [],
@@ -111,6 +115,111 @@ export async function loadSessionRecord(paths: AppPaths): Promise<SessionRecord>
       : null;
 
   record.tasks = normalizeTaskSpecs(record.tasks);
+  record.receipts = Array.isArray(record.receipts)
+    ? record.receipts
+        .filter((item) => item && typeof item === "object" && !Array.isArray(item))
+        .map((item) => {
+          const receipt = item as Record<string, unknown>;
+          return {
+            id: String(receipt.id),
+            missionId: String(receipt.missionId),
+            taskId: String(receipt.taskId),
+            owner: receipt.owner === "claude" || receipt.owner === "router" ? receipt.owner : "codex",
+            nodeKind:
+              receipt.nodeKind === "research" ||
+              receipt.nodeKind === "scaffold" ||
+              receipt.nodeKind === "backend" ||
+              receipt.nodeKind === "frontend" ||
+              receipt.nodeKind === "shared_contract" ||
+              receipt.nodeKind === "infra" ||
+              receipt.nodeKind === "tests" ||
+              receipt.nodeKind === "docs" ||
+              receipt.nodeKind === "review" ||
+              receipt.nodeKind === "repair" ||
+              receipt.nodeKind === "integration"
+                ? receipt.nodeKind
+                : null,
+            outcome:
+              receipt.outcome === "failed" || receipt.outcome === "blocked"
+                ? receipt.outcome
+                : "completed",
+            title: typeof receipt.title === "string" ? receipt.title : "Mission receipt",
+            summary: typeof receipt.summary === "string" ? receipt.summary : "",
+            changedPaths: Array.isArray(receipt.changedPaths)
+              ? receipt.changedPaths.map((value) => String(value))
+              : [],
+            commands: Array.isArray(receipt.commands)
+              ? receipt.commands.map((value) => String(value))
+              : [],
+            verificationEvidence: Array.isArray(receipt.verificationEvidence)
+              ? receipt.verificationEvidence.map((value) => String(value))
+              : [],
+            assumptions: Array.isArray(receipt.assumptions)
+              ? receipt.assumptions.map((value) => String(value))
+              : [],
+            followUps: Array.isArray(receipt.followUps)
+              ? receipt.followUps.map((value) => String(value))
+              : [],
+            risks: Array.isArray(receipt.risks)
+              ? receipt.risks.map((value) => String(value))
+              : [],
+            createdAt: typeof receipt.createdAt === "string" ? receipt.createdAt : nowIso()
+          } satisfies MissionReceipt;
+        })
+    : [];
+  record.contracts = Array.isArray(record.contracts)
+    ? record.contracts
+        .filter((item) => item && typeof item === "object" && !Array.isArray(item))
+        .map((item) => {
+          const contract = item as Record<string, unknown>;
+          return {
+            id: String(contract.id),
+            missionId: String(contract.missionId),
+            sourceTaskId: String(contract.sourceTaskId),
+            sourceMessageId: typeof contract.sourceMessageId === "string" ? contract.sourceMessageId : null,
+            sourceAgent: contract.sourceAgent === "claude" ? "claude" : "codex",
+            targetAgent:
+              contract.targetAgent === "claude" ||
+              contract.targetAgent === "operator"
+                ? contract.targetAgent
+                : "codex",
+            kind:
+              contract.kind === "request_contract" ||
+              contract.kind === "request_stub" ||
+              contract.kind === "request_refinement" ||
+              contract.kind === "request_review" ||
+              contract.kind === "request_verification" ||
+              contract.kind === "request_risk_check" ||
+              contract.kind === "handoff_complete"
+                ? contract.kind
+                : "request_contract",
+            status:
+              contract.status === "resolved" || contract.status === "dismissed"
+                ? contract.status
+                : "open",
+            title: typeof contract.title === "string" ? contract.title : "Agent contract",
+            detail: typeof contract.detail === "string" ? contract.detail : "",
+            requiredArtifacts: Array.isArray(contract.requiredArtifacts)
+              ? contract.requiredArtifacts.map((value) => String(value))
+              : [],
+            acceptanceExpectations: Array.isArray(contract.acceptanceExpectations)
+              ? contract.acceptanceExpectations.map((value) => String(value))
+              : [],
+            urgency:
+              contract.urgency === "low" || contract.urgency === "high"
+                ? contract.urgency
+                : "normal",
+            dependencyImpact: contract.dependencyImpact === "sidecar" ? "sidecar" : "blocking",
+            claimedPaths: Array.isArray(contract.claimedPaths)
+              ? contract.claimedPaths.map((value) => String(value))
+              : [],
+            createdAt: typeof contract.createdAt === "string" ? contract.createdAt : nowIso(),
+            updatedAt: typeof contract.updatedAt === "string" ? contract.updatedAt : nowIso(),
+            resolvedAt: typeof contract.resolvedAt === "string" ? contract.resolvedAt : null,
+            resolvedByTaskId: typeof contract.resolvedByTaskId === "string" ? contract.resolvedByTaskId : null
+          } satisfies AgentContract;
+        })
+    : [];
   record.plans = Array.isArray(record.plans)
     ? record.plans.map((plan) => ({
         id: String(plan.id),
@@ -277,6 +386,158 @@ export async function loadSessionRecord(paths: AppPaths): Promise<SessionRecord>
                     .map((item) => normalizeCheck(item))
                     .filter((item): item is AcceptanceCheck => item !== null)
                 : [],
+              failurePacks: Array.isArray(acceptance.failurePacks)
+                ? acceptance.failurePacks
+                    .filter((item) => item && typeof item === "object" && !Array.isArray(item))
+                    .map((item) => {
+                      const pack = item as Record<string, unknown>;
+                      return {
+                        id: typeof pack.id === "string" ? pack.id : `failure-${randomUUID()}`,
+                        missionId: typeof pack.missionId === "string" ? pack.missionId : "",
+                        checkId: typeof pack.checkId === "string" ? pack.checkId : "",
+                        kind:
+                          pack.kind === "command" ||
+                          pack.kind === "file" ||
+                          pack.kind === "docs" ||
+                          pack.kind === "scenario" ||
+                          pack.kind === "contract" ||
+                          pack.kind === "http" ||
+                          pack.kind === "browser"
+                            ? pack.kind
+                            : "command",
+                        title: typeof pack.title === "string" ? pack.title : "Acceptance failure",
+                        summary: typeof pack.summary === "string" ? pack.summary : "",
+                        expected: Array.isArray(pack.expected) ? pack.expected.map((value) => String(value)) : [],
+                        observed: Array.isArray(pack.observed) ? pack.observed.map((value) => String(value)) : [],
+                        evidence: Array.isArray(pack.evidence) ? pack.evidence.map((value) => String(value)) : [],
+                        likelyOwners: Array.isArray(pack.likelyOwners)
+                          ? pack.likelyOwners.filter((value): value is AgentName => value === "codex" || value === "claude")
+                          : [],
+                        likelyTaskIds: Array.isArray(pack.likelyTaskIds)
+                          ? pack.likelyTaskIds.map((value) => String(value))
+                          : [],
+                        attribution: typeof pack.attribution === "string" ? pack.attribution : null,
+                        repairFocus: Array.isArray(pack.repairFocus) ? pack.repairFocus.map((value) => String(value)) : [],
+                        command: typeof pack.command === "string" ? pack.command : null,
+                        harnessPath: typeof pack.harnessPath === "string" ? pack.harnessPath : null,
+                        serverCommand: typeof pack.serverCommand === "string" ? pack.serverCommand : null,
+                        request:
+                          pack.request && typeof pack.request === "object" && !Array.isArray(pack.request)
+                            ? {
+                                method: typeof (pack.request as Record<string, unknown>).method === "string" ? String((pack.request as Record<string, unknown>).method) : null,
+                                urlPath: typeof (pack.request as Record<string, unknown>).urlPath === "string" ? String((pack.request as Record<string, unknown>).urlPath) : null,
+                                routeCandidates: Array.isArray((pack.request as Record<string, unknown>).routeCandidates)
+                                  ? ((pack.request as Record<string, unknown>).routeCandidates as unknown[]).map((value) => String(value))
+                                  : [],
+                                headers:
+                                  (pack.request as Record<string, unknown>).headers &&
+                                  typeof (pack.request as Record<string, unknown>).headers === "object" &&
+                                  !Array.isArray((pack.request as Record<string, unknown>).headers)
+                                    ? Object.fromEntries(
+                                        Object.entries((pack.request as Record<string, unknown>).headers as Record<string, unknown>)
+                                          .map(([key, value]) => [key, String(value)])
+                                      )
+                                    : {},
+                                body: typeof (pack.request as Record<string, unknown>).body === "string" ? String((pack.request as Record<string, unknown>).body) : null,
+                                selector: typeof (pack.request as Record<string, unknown>).selector === "string" ? String((pack.request as Record<string, unknown>).selector) : null,
+                                selectorCandidates: Array.isArray((pack.request as Record<string, unknown>).selectorCandidates)
+                                  ? ((pack.request as Record<string, unknown>).selectorCandidates as unknown[]).map((value) => String(value))
+                                  : []
+                              }
+                            : {
+                                method: null,
+                                urlPath: null,
+                                routeCandidates: [],
+                                headers: {},
+                                body: null,
+                                selector: null,
+                                selectorCandidates: []
+                              },
+                        expectedSignals:
+                          pack.expectedSignals && typeof pack.expectedSignals === "object" && !Array.isArray(pack.expectedSignals)
+                            ? {
+                                title: typeof (pack.expectedSignals as Record<string, unknown>).title === "string" ? String((pack.expectedSignals as Record<string, unknown>).title) : null,
+                                status:
+                                  typeof (pack.expectedSignals as Record<string, unknown>).status === "number" &&
+                                  Number.isFinite((pack.expectedSignals as Record<string, unknown>).status)
+                                    ? Number((pack.expectedSignals as Record<string, unknown>).status)
+                                    : null,
+                                contentType: typeof (pack.expectedSignals as Record<string, unknown>).contentType === "string" ? String((pack.expectedSignals as Record<string, unknown>).contentType) : null,
+                                text: Array.isArray((pack.expectedSignals as Record<string, unknown>).text)
+                                  ? ((pack.expectedSignals as Record<string, unknown>).text as unknown[]).map((value) => String(value))
+                                  : [],
+                                jsonKeys: Array.isArray((pack.expectedSignals as Record<string, unknown>).jsonKeys)
+                                  ? ((pack.expectedSignals as Record<string, unknown>).jsonKeys as unknown[]).map((value) => String(value))
+                                  : []
+                              }
+                            : {
+                                title: null,
+                                status: null,
+                                contentType: null,
+                                text: [],
+                                jsonKeys: []
+                              },
+                        runtimeCapture:
+                          pack.runtimeCapture && typeof pack.runtimeCapture === "object" && !Array.isArray(pack.runtimeCapture)
+                            ? {
+                                detail: typeof (pack.runtimeCapture as Record<string, unknown>).detail === "string" ? String((pack.runtimeCapture as Record<string, unknown>).detail) : "",
+                                lastOutput: typeof (pack.runtimeCapture as Record<string, unknown>).lastOutput === "string" ? String((pack.runtimeCapture as Record<string, unknown>).lastOutput) : ""
+                              }
+                            : {
+                                detail: typeof pack.detail === "string" ? pack.detail : "",
+                                lastOutput: typeof pack.lastOutput === "string" ? pack.lastOutput : ""
+                              },
+                        createdAt: typeof pack.createdAt === "string" ? pack.createdAt : createdAt,
+                        updatedAt: typeof pack.updatedAt === "string" ? pack.updatedAt : createdAt
+                      };
+                    })
+                : [],
+              repairPlans: Array.isArray(acceptance.repairPlans)
+                ? acceptance.repairPlans
+                    .filter((item) => item && typeof item === "object" && !Array.isArray(item))
+                    .map((item) => {
+                      const plan = item as Record<string, unknown>;
+                      return {
+                        id: typeof plan.id === "string" ? plan.id : `repair-${randomUUID()}`,
+                        missionId: typeof plan.missionId === "string" ? plan.missionId : "",
+                        title: typeof plan.title === "string" ? plan.title : "Acceptance repair plan",
+                        owner: plan.owner === "claude" ? "claude" : "codex",
+                        status:
+                          plan.status === "queued" || plan.status === "applied"
+                            ? plan.status
+                            : "proposed",
+                        failureFingerprint: typeof plan.failureFingerprint === "string" ? plan.failureFingerprint : "",
+                        failedCheckIds: Array.isArray(plan.failedCheckIds) ? plan.failedCheckIds.map((value) => String(value)) : [],
+                        failurePackIds: Array.isArray(plan.failurePackIds) ? plan.failurePackIds.map((value) => String(value)) : [],
+                        summary: typeof plan.summary === "string" ? plan.summary : "",
+                        prompt: typeof plan.prompt === "string" ? plan.prompt : "",
+                        routeReason: typeof plan.routeReason === "string" ? plan.routeReason : "",
+                        routeStrategy:
+                          plan.routeStrategy === "path-claim" ||
+                          plan.routeStrategy === "keyword" ||
+                          plan.routeStrategy === "manual" ||
+                          plan.routeStrategy === "owner-path" ||
+                          plan.routeStrategy === "ai" ||
+                          plan.routeStrategy === "fallback"
+                            ? plan.routeStrategy
+                            : "fallback",
+                        routeConfidence:
+                          typeof plan.routeConfidence === "number" && Number.isFinite(plan.routeConfidence)
+                            ? Math.max(0, Math.min(1, plan.routeConfidence))
+                            : 0.5,
+                        claimedPaths: Array.isArray(plan.claimedPaths) ? plan.claimedPaths.map((value) => String(value)) : [],
+                        likelyOwners: Array.isArray(plan.likelyOwners)
+                          ? plan.likelyOwners.filter((value): value is AgentName => value === "codex" || value === "claude")
+                          : [],
+                        likelyTaskIds: Array.isArray(plan.likelyTaskIds) ? plan.likelyTaskIds.map((value) => String(value)) : [],
+                        repairFocus: Array.isArray(plan.repairFocus) ? plan.repairFocus.map((value) => String(value)) : [],
+                        evidence: Array.isArray(plan.evidence) ? plan.evidence.map((value) => String(value)) : [],
+                        createdAt: typeof plan.createdAt === "string" ? plan.createdAt : createdAt,
+                        updatedAt: typeof plan.updatedAt === "string" ? plan.updatedAt : createdAt,
+                        queuedTaskId: typeof plan.queuedTaskId === "string" ? plan.queuedTaskId : null
+                      };
+                    })
+                : [],
               status:
                 acceptance.status === "passed" || acceptance.status === "failed"
                   ? acceptance.status
@@ -403,6 +664,16 @@ export async function loadSessionRecord(paths: AppPaths): Promise<SessionRecord>
               ? mission.activeTaskIds.map((item) => String(item))
               : [],
             autopilotEnabled: mission.autopilotEnabled !== false,
+            phase:
+              mission.phase === "specifying" ||
+              mission.phase === "simulating" ||
+              mission.phase === "executing" ||
+              mission.phase === "repairing" ||
+              mission.phase === "verifying" ||
+              mission.phase === "landing" ||
+              mission.phase === "postmortem"
+                ? mission.phase
+                : undefined,
             spec: missionSpec
               ? {
                   normalizedPrompt:
@@ -488,6 +759,14 @@ export async function loadSessionRecord(paths: AppPaths): Promise<SessionRecord>
                     typeof missionPolicy.retryBudget === "number" && Number.isFinite(missionPolicy.retryBudget)
                       ? missionPolicy.retryBudget
                       : 1,
+                  operatorAttentionBudget:
+                    typeof missionPolicy.operatorAttentionBudget === "number" && Number.isFinite(missionPolicy.operatorAttentionBudget)
+                      ? Math.max(0, Math.trunc(missionPolicy.operatorAttentionBudget))
+                      : 6,
+                  escalationPolicy:
+                    missionPolicy.escalationPolicy === "strict" || missionPolicy.escalationPolicy === "aggressive"
+                      ? missionPolicy.escalationPolicy
+                      : "balanced",
                   verificationMode: missionPolicy.verificationMode === "strict" ? "strict" : "standard",
                   landPolicy: missionPolicy.landPolicy === "manual_review" ? "manual_review" : "acceptance_gated",
                   gatePolicy: Array.isArray(missionPolicy.gatePolicy)
@@ -517,8 +796,111 @@ export async function loadSessionRecord(paths: AppPaths): Promise<SessionRecord>
                   updatedAt: typeof missionHealth.updatedAt === "string" ? missionHealth.updatedAt : createdAt
                 }
               : undefined,
+            specRevisions: Array.isArray(mission.specRevisions)
+              ? mission.specRevisions
+                  .filter((item) => item && typeof item === "object" && !Array.isArray(item))
+                  .map((item) => {
+                    const revision = item as Record<string, unknown>;
+                    return {
+                      id: typeof revision.id === "string" ? revision.id : `spec-revision-${randomUUID()}`,
+                      version:
+                        typeof revision.version === "number" && Number.isFinite(revision.version)
+                          ? Math.max(1, Math.trunc(revision.version))
+                          : 1,
+                      summary: typeof revision.summary === "string" ? revision.summary : "Mission spec revision",
+                      prompt: typeof revision.prompt === "string" ? revision.prompt : "",
+                      sourceTaskId: typeof revision.sourceTaskId === "string" ? revision.sourceTaskId : null,
+                      createdAt: typeof revision.createdAt === "string" ? revision.createdAt : createdAt
+                    };
+                  })
+              : [],
+            simulation:
+              mission.simulation && typeof mission.simulation === "object" && !Array.isArray(mission.simulation)
+                ? {
+                    generatedAt:
+                      typeof (mission.simulation as Record<string, unknown>).generatedAt === "string"
+                        ? String((mission.simulation as Record<string, unknown>).generatedAt)
+                        : createdAt,
+                    attentionCost:
+                      typeof (mission.simulation as Record<string, unknown>).attentionCost === "number"
+                        ? Number((mission.simulation as Record<string, unknown>).attentionCost)
+                        : 0,
+                    attentionBudget:
+                      typeof (mission.simulation as Record<string, unknown>).attentionBudget === "number"
+                        ? Number((mission.simulation as Record<string, unknown>).attentionBudget)
+                        : 6,
+                    gatePressure:
+                      typeof (mission.simulation as Record<string, unknown>).gatePressure === "number"
+                        ? Number((mission.simulation as Record<string, unknown>).gatePressure)
+                        : 0,
+                    serialityScore:
+                      typeof (mission.simulation as Record<string, unknown>).serialityScore === "number"
+                        ? Number((mission.simulation as Record<string, unknown>).serialityScore)
+                        : 0,
+                    contractRequestCount:
+                      typeof (mission.simulation as Record<string, unknown>).contractRequestCount === "number"
+                        ? Number((mission.simulation as Record<string, unknown>).contractRequestCount)
+                        : 0,
+                    escalationPressure:
+                      (mission.simulation as Record<string, unknown>).escalationPressure === "high" ||
+                      (mission.simulation as Record<string, unknown>).escalationPressure === "medium"
+                        ? ((mission.simulation as Record<string, unknown>).escalationPressure as "high" | "medium")
+                        : "low",
+                    escalationReasons: Array.isArray((mission.simulation as Record<string, unknown>).escalationReasons)
+                      ? ((mission.simulation as Record<string, unknown>).escalationReasons as unknown[]).map((item) => String(item))
+                      : [],
+                    autopilotViable: (mission.simulation as Record<string, unknown>).autopilotViable !== false,
+                    estimatedParallelism:
+                      typeof (mission.simulation as Record<string, unknown>).estimatedParallelism === "number"
+                        ? Number((mission.simulation as Record<string, unknown>).estimatedParallelism)
+                        : 1,
+                    verificationCoverage:
+                      (mission.simulation as Record<string, unknown>).verificationCoverage === "strong" ||
+                      (mission.simulation as Record<string, unknown>).verificationCoverage === "partial"
+                        ? ((mission.simulation as Record<string, unknown>).verificationCoverage as "strong" | "partial")
+                        : "thin",
+                    contractCoverage:
+                      (mission.simulation as Record<string, unknown>).contractCoverage === "explicit" ||
+                      (mission.simulation as Record<string, unknown>).contractCoverage === "partial"
+                        ? ((mission.simulation as Record<string, unknown>).contractCoverage as "explicit" | "partial")
+                        : "missing",
+                    issues: Array.isArray((mission.simulation as Record<string, unknown>).issues)
+                      ? ((mission.simulation as Record<string, unknown>).issues as unknown[])
+                          .filter((item) => item && typeof item === "object" && !Array.isArray(item))
+                          .map((item) => {
+                            const issue = item as Record<string, unknown>;
+                            return {
+                              id: typeof issue.id === "string" ? issue.id : `sim-${randomUUID()}`,
+                              kind:
+                                issue.kind === "coordination" ||
+                                issue.kind === "verification" ||
+                                issue.kind === "seriality" ||
+                                issue.kind === "attention" ||
+                                issue.kind === "overlap"
+                                  ? issue.kind
+                                  : "attention",
+                              severity:
+                                issue.severity === "low" || issue.severity === "high"
+                                  ? issue.severity
+                                  : "medium",
+                              title: typeof issue.title === "string" ? issue.title : "Mission simulation issue",
+                              detail: typeof issue.detail === "string" ? issue.detail : ""
+                            };
+                          })
+                      : [],
+                    recommendations: Array.isArray((mission.simulation as Record<string, unknown>).recommendations)
+                      ? ((mission.simulation as Record<string, unknown>).recommendations as unknown[]).map((item) => String(item))
+                      : []
+                  }
+                : undefined,
             appliedPatternIds: Array.isArray(mission.appliedPatternIds)
               ? mission.appliedPatternIds.map((item) => String(item))
+              : [],
+            receiptIds: Array.isArray(mission.receiptIds)
+              ? mission.receiptIds.map((item) => String(item))
+              : [],
+            contractIds: Array.isArray(mission.contractIds)
+              ? mission.contractIds.map((item) => String(item))
               : [],
             acceptance: normalizeAcceptance(mission.acceptance),
             checkpoints: Array.isArray(mission.checkpoints)
@@ -565,7 +947,11 @@ export async function loadSessionRecord(paths: AppPaths): Promise<SessionRecord>
               entry.category === "fact" ||
               entry.category === "decision" ||
               entry.category === "procedure" ||
-              entry.category === "risk"
+              entry.category === "risk" ||
+              entry.category === "topology" ||
+              entry.category === "contract" ||
+              entry.category === "failure" ||
+              entry.category === "verification"
                 ? entry.category
                 : "artifact",
             scope:

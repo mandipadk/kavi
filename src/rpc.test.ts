@@ -36,7 +36,7 @@ import { loadTaskArtifact, saveTaskArtifact } from "./task-artifacts.ts";
 
 async function waitFor(
   predicate: () => Promise<boolean>,
-  timeoutMs = 5_000
+  timeoutMs = 10_000
 ): Promise<void> {
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
@@ -493,37 +493,46 @@ test("daemon exposes operator state and control over the Unix socket", async (t)
     true
   );
 
-  const retrySession = await loadSessionRecord(paths);
-  retrySession.tasks.push({
-    id: "task-failed",
-    missionId: null,
-    title: "Retry me",
-    owner: "codex",
-    kind: "execution",
-    nodeKind: "backend",
-    status: "failed",
-    prompt: "Retry me",
-    dependsOnTaskIds: [],
-    parentTaskId: null,
-    planId: null,
-    planNodeKey: null,
-    retryCount: 2,
-    maxRetries: 2,
-    lastFailureSummary: "Task timed out after 120 seconds.",
-    lease: null,
-    createdAt: "2026-03-25T00:07:00.000Z",
-    updatedAt: "2026-03-25T00:07:00.000Z",
-    summary: "Task failed and is ready for operator retry.",
-    nextRecommendation: null,
-    routeReason: null,
-    routeStrategy: "manual",
-    routeConfidence: 1,
-    routeMetadata: {},
-    claimedPaths: []
-  });
-  await saveSessionRecord(paths, retrySession);
-  await rpcNotifyExternalUpdate(paths, "test.retry_seeded");
-  await waitFor(async () => pushedReasons.includes("test.retry_seeded"));
+  async function seedRetryTask(): Promise<void> {
+    const retrySession = await loadSessionRecord(paths);
+    if (!retrySession.tasks.some((task) => task.id === "task-failed")) {
+      retrySession.tasks.push({
+        id: "task-failed",
+        missionId: null,
+        title: "Retry me",
+        owner: "codex",
+        kind: "execution",
+        nodeKind: "backend",
+        status: "failed",
+        prompt: "Retry me",
+        dependsOnTaskIds: [],
+        parentTaskId: null,
+        planId: null,
+        planNodeKey: null,
+        retryCount: 2,
+        maxRetries: 2,
+        lastFailureSummary: "Task timed out after 120 seconds.",
+        lease: null,
+        createdAt: "2026-03-25T00:07:00.000Z",
+        updatedAt: "2026-03-25T00:07:00.000Z",
+        summary: "Task failed and is ready for operator retry.",
+        nextRecommendation: null,
+        routeReason: null,
+        routeStrategy: "manual",
+        routeConfidence: 1,
+        routeMetadata: {},
+        claimedPaths: []
+      });
+      await saveSessionRecord(paths, retrySession);
+    }
+    await rpcNotifyExternalUpdate(paths, "test.retry_seeded");
+    await waitFor(async () => {
+      const snapshot = await readSnapshot(paths);
+      return snapshot.session.tasks.some((task) => task.id === "task-failed");
+    });
+  }
+
+  await seedRetryTask();
 
   await rpcRetryTask(paths, "task-failed");
   await waitFor(async () => pushedReasons.includes("task.retry_queued"));

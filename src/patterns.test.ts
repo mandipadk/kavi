@@ -7,10 +7,13 @@ import { createMission } from "./missions.ts";
 import { resolveAppPaths } from "./paths.ts";
 import {
   attachRelevantPatternsToMission,
+  buildPatternBenchmarks,
   buildPatternConstellation,
+  buildPatternStudio,
   buildPatternAppliedPrompt,
   buildPatternTemplatePrompt,
   buildPatternTemplates,
+  composePatternTemplates,
   captureLandingPatterns,
   captureMissionAntiPatterns,
   listPatterns,
@@ -184,6 +187,7 @@ test("attachRelevantPatternsToMission promotes matching patterns into mission br
   assert.ok(mission.brainEntryIds.includes(entries[0]!.id));
   assert.ok(session.brain.some((entry) => entry.id === entries[0]!.id));
   assert.ok((mission.appliedPatternIds ?? []).length > 0);
+  assert.ok(entries.some((entry) => entry.title.startsWith("Pattern composition:")));
 });
 
 test("rankPatterns and buildPatternAppliedPrompt expose reusable templates", async () => {
@@ -226,6 +230,68 @@ test("buildPatternTemplates and template prompts expose portfolio-level reuse", 
   assert.ok(ranked.length >= 1);
   assert.match(composed, /Portfolio template context selected by Kavi/);
   assert.match(composed, /Acceptance defaults/);
+});
+
+test("buildPatternBenchmarks and composePatternTemplates expose portfolio leverage", async () => {
+  const repoRoot = await mkdtemp(path.join(os.tmpdir(), "kavi-pattern-compose-"));
+  const relatedRepoRoot = await mkdtemp(path.join(os.tmpdir(), "kavi-pattern-compose-related-"));
+  const paths = {
+    ...resolveAppPaths(repoRoot),
+    patternsFile: path.join(repoRoot, ".kavi-patterns.json")
+  };
+  const session = createSession(repoRoot);
+  const relatedSession = createSession(relatedRepoRoot);
+  const mission = createMission(session, "Build a clinic command center with a web shell and API.");
+  const relatedMission = createMission(relatedSession, "Build a clinic dispatch board with a web shell and API.");
+  session.missions.push(mission);
+  relatedSession.missions.push(relatedMission);
+
+  await captureLandingPatterns(paths, session, createLandReport(session.id));
+  await captureLandingPatterns(paths, relatedSession, createLandReport(relatedSession.id));
+  await captureMissionAntiPatterns(paths, session, mission);
+  const benchmarks = await buildPatternBenchmarks(paths);
+  const composition = await composePatternTemplates(
+    paths,
+    "Create a new clinic dashboard with docs and api verification."
+  );
+
+  assert.ok(benchmarks.length >= 1);
+  assert.ok(benchmarks[0]!.score > 0);
+  assert.ok(composition.templateIds.length >= 1);
+  assert.ok(composition.templateIds.every((templateId) => !templateId.startsWith("template:anti_pattern")));
+  assert.match(composition.composedPrompt, /Composed portfolio pattern context selected by Kavi/);
+  assert.ok(composition.benchmarkScore > 0);
+  assert.ok(composition.commands.every((command) => !command.includes("/private/tmp/")));
+});
+
+test("buildPatternStudio combines composition, benchmark, and constellation evidence", async () => {
+  const repoRoot = await mkdtemp(path.join(os.tmpdir(), "kavi-pattern-studio-"));
+  const relatedRepoRoot = await mkdtemp(path.join(os.tmpdir(), "kavi-pattern-studio-related-"));
+  const paths = {
+    ...resolveAppPaths(repoRoot),
+    patternsFile: path.join(repoRoot, ".kavi-patterns.json")
+  };
+  const session = createSession(repoRoot);
+  const relatedSession = createSession(relatedRepoRoot);
+  const mission = createMission(session, "Build a clinic command center with a web shell and API.");
+  const relatedMission = createMission(relatedSession, "Build a clinic triage dashboard with docs, web shell, and API.");
+  session.missions.push(mission);
+  relatedSession.missions.push(relatedMission);
+
+  await captureLandingPatterns(paths, session, createLandReport(session.id));
+  await captureLandingPatterns(paths, relatedSession, createLandReport(relatedSession.id));
+  await captureMissionAntiPatterns(paths, session, mission);
+
+  const studio = await buildPatternStudio(
+    paths,
+    "Create a clinic operations platform with docs, frontend dashboards, and scheduling APIs."
+  );
+
+  assert.ok(studio.rankedTemplates.length >= 1);
+  assert.ok(studio.composition.templateIds.length >= 1);
+  assert.ok(studio.selectedBenchmarks.length >= 1);
+  assert.ok(studio.relatedRepoClusters.length >= 1);
+  assert.ok(studio.topStacks.some((item) => item.value === "typescript"));
 });
 
 test("captureMissionAntiPatterns and buildPatternConstellation surface recurring risks", async () => {

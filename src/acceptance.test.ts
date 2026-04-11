@@ -5,6 +5,8 @@ import os from "node:os";
 import path from "node:path";
 import { mkdtemp } from "node:fs/promises";
 import {
+  buildAcceptanceFailurePacks,
+  compileAcceptanceRepairPlans,
   explainAcceptanceFailure,
   evaluateAcceptanceCheck,
   planAcceptanceRepair,
@@ -297,6 +299,101 @@ test("planAcceptanceRepairs can split failed checks by likely owner", () => {
   assert.ok(repairPlans.every((plan) => plan.routeMetadata.groupedRepair !== false));
 });
 
+test("failure packs and repair plans preserve attribution, evidence, and focus", () => {
+  const session = createSession("/tmp/repo");
+  const mission = createMission(
+    session,
+    "Build a frontend and backend starter with docs, tests, and a web UI."
+  );
+  session.missions.push(mission);
+  mission.acceptance.checks.push(
+    {
+      id: "check-browser",
+      title: "Primary browser flow surface exists",
+      kind: "browser",
+      command: "node .kavi/runtime/acceptance/browser-check.js",
+      path: "apps/web/app/page.tsx",
+      harnessPath: ".kavi/runtime/acceptance/browser-check.js",
+      serverCommand: "npm run dev",
+      target: "clinic dashboard",
+      urlPath: "/",
+      routeCandidates: ["/"],
+      method: null,
+      requestBody: null,
+      requestHeaders: {},
+      selector: "app-shell",
+      selectorCandidates: ["app-shell", "main"],
+      expectedTitle: "Clinic Dashboard",
+      expectedStatus: 200,
+      expectedContentType: "text/html",
+      expectedJsonKeys: [],
+      evidencePaths: ["apps/web/app/page.tsx"],
+      expectedText: ["clinic", "dashboard"],
+      likelyTaskIds: ["task-web"],
+      likelyOwners: ["claude"],
+      likelyReason: "frontend surface",
+      status: "failed",
+      detail: "Expected clinic dashboard content.",
+      lastRunAt: "2026-04-10T00:00:00.000Z",
+      lastOutput: "Browser check failed: missing visible text clinic"
+    },
+    {
+      id: "check-http",
+      title: "Primary API or backend route surface exists",
+      kind: "http",
+      command: "node .kavi/runtime/acceptance/http-check.js",
+      path: "apps/api/src/server.ts",
+      harnessPath: ".kavi/runtime/acceptance/http-check.js",
+      serverCommand: "npm run start",
+      target: "health endpoint",
+      urlPath: "/api/health",
+      routeCandidates: ["/api", "/api/health"],
+      method: "GET",
+      requestBody: null,
+      requestHeaders: {
+        accept: "application/json"
+      },
+      selector: null,
+      selectorCandidates: [],
+      expectedTitle: null,
+      expectedStatus: 200,
+      expectedContentType: "application/json",
+      expectedJsonKeys: ["ok", "uptime"],
+      evidencePaths: ["apps/api/src/server.ts"],
+      expectedText: [],
+      likelyTaskIds: ["task-api"],
+      likelyOwners: ["codex"],
+      likelyReason: "backend route",
+      status: "failed",
+      detail: "Expected healthy response.",
+      lastRunAt: "2026-04-10T00:00:00.000Z",
+      lastOutput: "HTTP 500 from /api/health"
+    }
+  );
+
+  const failurePacks = buildAcceptanceFailurePacks(mission);
+  const repairPlans = compileAcceptanceRepairPlans(
+    mission,
+    planAcceptanceRepairs(session, mission, {
+      owner: "codex",
+      strategy: "fallback",
+      confidence: 0.4,
+      reason: "fallback",
+      claimedPaths: [],
+      metadata: {}
+    }),
+    failurePacks
+  );
+
+  assert.equal(failurePacks.length, 2);
+  assert.ok(failurePacks.some((pack) => pack.request.selector === "app-shell"));
+  assert.ok(failurePacks.some((pack) => pack.expectedSignals.jsonKeys.includes("ok")));
+  assert.ok(failurePacks.every((pack) => pack.runtimeCapture.lastOutput.length > 0));
+  assert.equal(repairPlans.length, 2);
+  assert.ok(repairPlans.every((plan) => plan.failurePackIds.length > 0));
+  assert.ok(repairPlans.every((plan) => plan.repairFocus.length > 0));
+});
+
 test("synthesizeMissionAcceptanceChecks stays docs-focused and idempotent for docs-only missions", async () => {
   const repoRoot = await mkdtemp(path.join(os.tmpdir(), "kavi-acceptance-docs-"));
   await fs.writeFile(path.join(repoRoot, "README.md"), "# Tiny CLI\n");
@@ -359,6 +456,60 @@ test("synthesizeMissionAcceptanceChecks stays docs-focused and idempotent for do
   const scenarioResult = await evaluateAcceptanceCheck(repoRoot, mission, scenarioCheck!);
   assert.equal(scenarioResult.status, "passed");
   assert.match(scenarioResult.lastOutput, /README\.md|docs\/quickstart\.md/);
+});
+
+test("browser and http acceptance checks do not pass from docs-only evidence", async () => {
+  const repoRoot = await mkdtemp(path.join(os.tmpdir(), "kavi-acceptance-docs-only-"));
+  await fs.writeFile(path.join(repoRoot, "README.md"), "# Placeholder\nImplementation pending.\n");
+
+  const session = createSession(repoRoot);
+  const mission = createMission(
+    session,
+    "Build a frontend and backend starter with docs and a browser shell."
+  );
+  session.missions.push(mission);
+  session.tasks.push({
+    id: "task-docs-only",
+    missionId: mission.id,
+    title: "Write placeholder docs",
+    owner: "claude",
+    kind: "execution",
+    nodeKind: "docs",
+    status: "completed",
+    prompt: "Write placeholder docs",
+    dependsOnTaskIds: [],
+    parentTaskId: null,
+    planId: null,
+    planNodeKey: null,
+    retryCount: 0,
+    maxRetries: 1,
+    lastFailureSummary: null,
+    lease: null,
+    createdAt: session.createdAt,
+    updatedAt: session.updatedAt,
+    summary: "Created placeholder README only.",
+    nextRecommendation: null,
+    routeReason: null,
+    routeStrategy: null,
+    routeConfidence: null,
+    routeMetadata: {},
+    claimedPaths: ["README.md"]
+  });
+
+  await synthesizeMissionAcceptanceChecks(repoRoot, session, mission);
+  const httpCheck = mission.acceptance.checks.find((check) => check.kind === "http");
+  const browserCheck = mission.acceptance.checks.find((check) => check.kind === "browser");
+
+  assert.ok(httpCheck);
+  assert.ok(browserCheck);
+  assert.deepEqual(httpCheck?.evidencePaths ?? [], []);
+  assert.deepEqual(browserCheck?.evidencePaths ?? [], []);
+
+  const http = await evaluateAcceptanceCheck(repoRoot, mission, httpCheck!);
+  const browser = await evaluateAcceptanceCheck(repoRoot, mission, browserCheck!);
+
+  assert.equal(http.status, "failed");
+  assert.equal(browser.status, "failed");
 });
 
 test("synthesizeMissionAcceptanceChecks keeps README-specific docs checks honest", async () => {

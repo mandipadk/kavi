@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { relevantBrainEntries } from "../brain.ts";
+import { buildBrainPack } from "../brain.ts";
 import { findMission } from "../missions.ts";
 import { nowIso } from "../paths.ts";
 import type {
@@ -318,16 +318,25 @@ export function buildSharedContext(
     .map((claim) => `- ${claim.agent} | ${claim.paths.join(", ")}`)
     .join("\n");
 
-  const brain = relevantBrainEntries(session, task)
-    .map((entry) => {
-      const meta = [
-        entry.category ?? "artifact",
-        entry.scope ?? (entry.missionId ? "mission" : "repo"),
-        `${Math.round((entry.confidence ?? 0.6) * 100)}%`
-      ].join(" | ");
-      const evidence = (entry.evidence ?? []).join(", ");
-      return `- ${entry.title} [${meta}]${evidence ? ` evidence=${evidence}` : ""}: ${entry.content}`;
-    })
+  const brainPack = buildBrainPack(session, {
+    missionId: task.missionId,
+    task,
+    path: task.claimedPaths[0] ?? null,
+    limit: 3
+  });
+  const brain = brainPack.sections
+    .flatMap((section) => [
+      `- ${section.title}: ${section.rationale}`,
+      ...section.entries.map((entry) => {
+        const meta = [
+          entry.category ?? "artifact",
+          entry.scope ?? (entry.missionId ? "mission" : "repo"),
+          `${Math.round((entry.confidence ?? 0.6) * 100)}%`
+        ].join(" | ");
+        const evidence = (entry.evidence ?? []).join(", ");
+        return `  - ${entry.title} [${meta}]${evidence ? ` evidence=${evidence}` : ""}: ${entry.content}`;
+      })
+    ])
     .join("\n");
 
   const missionLines = mission
@@ -366,7 +375,7 @@ export function buildSharedContext(
     decisionReplay || "- empty",
     "Active path claims:",
     claims || "- empty",
-    "Relevant project memory:",
+    `Relevant project memory (${brainPack.phase} pack):`,
     brain || "- empty",
     `Peer inbox for ${agent}:`,
     inbox || "- empty"

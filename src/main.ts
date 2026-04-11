@@ -14,6 +14,7 @@ import {
   waitForApprovalDecision
 } from "./approvals.ts";
 import { parseCliInvocation } from "./cli.ts";
+import { buildBlueprintPreview, diffMissionBlueprint, diffMissionPrompts } from "./blueprint.ts";
 import { appendCommand } from "./command-queue.ts";
 import { collectProviderCapabilities, providerCapabilityErrors } from "./capabilities.ts";
 import {
@@ -39,9 +40,16 @@ import {
   listWorktreeChangedPaths
 } from "./git.ts";
 import { executeLand } from "./landing.ts";
-import { compareMissionFamily, compareMissions } from "./mission-compare.ts";
+import { arenaSortValue, compareMissionFamily, compareMissions } from "./mission-compare.ts";
+import {
+  buildMissionConfidence,
+  buildMissionDigest,
+  buildMissionMorningBrief,
+  buildMissionRecoveryPlan
+} from "./mission-controller.ts";
 import {
   addMissionCheckpoint,
+  applyMissionBlueprint,
   latestMission,
   selectMission,
   syncMissionStates,
@@ -51,32 +59,43 @@ import {
   explainAcceptanceFailure,
   explainMissionAcceptanceFailures
 } from "./acceptance.ts";
+import {
+  buildAgentContractTaskPrompt,
+  buildMissionPostmortem,
+  setAgentContractStatus
+} from "./mission-control.ts";
+import { auditBlocksShipping, buildMissionAuditReport, buildMissionObjections } from "./quality-court.ts";
 import { verifyMissionAcceptanceById } from "./mission-verify.ts";
 import { loadPackageInfo } from "./package-info.ts";
 import {
   buildPatternAppliedPrompt,
+  buildPatternBenchmarks,
   buildPatternConstellation,
+  buildPatternStudio,
   buildPatternTemplatePrompt,
   buildPatternTemplates,
+  composePatternTemplates,
   listPatterns,
   rankPatterns,
   rankPatternTemplates,
   searchPatterns
 } from "./patterns.ts";
 import { buildSessionId, nowIso, resolveAppPaths } from "./paths.ts";
-import { buildMissionPlayback } from "./playback.ts";
+import { buildMissionPlayback, filterMissionPlayback } from "./playback.ts";
 import { currentExecutionPlan, decidePlanningMode } from "./planning.ts";
 import { isProcessAlive, runCommand, runInteractiveCommand, spawnDetachedNode } from "./process.ts";
 import { parseClaudeHookEvent } from "./provider-runtime.ts";
 import { loadLatestLandReport } from "./reports.ts";
 import {
   pingRpc,
+  rpcApplyMissionBlueprint,
   rpcAppendHookProgress,
   readSnapshot,
   rpcDismissRecommendation,
   rpcEnqueueTask,
   rpcMergeBrainEntries,
   rpcSelectMission,
+  rpcSetAgentContractStatus,
   rpcUpdateMissionPolicy,
   rpcRetryTask,
   rpcNotifyExternalUpdate,
@@ -98,8 +117,13 @@ import {
   restoreOperatorRecommendation
 } from "./recommendations.ts";
 import {
+  applyBrainDistillationPlan,
+  buildBrainDistillationPlan,
   buildBrainGraph,
+  buildBrainPack,
+  buildBrainReviewQueue,
   explainBrainEntry,
+  filterBrainGraphMode,
   mergeBrainEntries,
   queryBrainEntries,
   retireBrainEntry,
@@ -142,6 +166,7 @@ import type {
   KaviSnapshot,
   RecommendationKind,
   RecommendationStatus,
+  SessionRecord,
   TaskSpec
 } from "./types.ts";
 
@@ -187,6 +212,78 @@ function getOptionalFilter(args: string[], name: string): string | null {
   return value;
 }
 
+async function buildBlueprintPreviewSession(cwd: string): Promise<{
+  session: SessionRecord;
+  paths: ReturnType<typeof resolveAppPaths>;
+}> {
+  const repoRoot = (await findRepoRoot(cwd)) ?? cwd;
+  const paths = resolveAppPaths(repoRoot);
+  if (await sessionExists(paths)) {
+    return {
+      session: await loadSessionRecord(paths),
+      paths
+    };
+  }
+
+  const config = await loadConfig(paths);
+  const runtime = await resolveSessionRuntime(paths);
+  const timestamp = new Date().toISOString();
+  return {
+    session: {
+      id: "blueprint-preview",
+      repoRoot,
+      baseCommit: "",
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      socketPath: paths.socketPath,
+      status: "stopped",
+      goal: null,
+      selectedMissionId: null,
+      fullAccessMode: false,
+      daemonPid: null,
+      daemonHeartbeatAt: null,
+      daemonVersion: null,
+      protocolVersion: null,
+      config,
+      runtime,
+      worktrees: [],
+      tasks: [],
+      plans: [],
+      missions: [],
+      receipts: [],
+      contracts: [],
+      brain: [],
+      providerCapabilities: [],
+      peerMessages: [],
+      decisions: [],
+      pathClaims: [],
+      reviewNotes: [],
+      recommendationStates: [],
+      agentStatus: {
+        codex: {
+          agent: "codex",
+          available: true,
+          transport: "codex-app-server",
+          lastRunAt: null,
+          lastExitCode: null,
+          sessionId: null,
+          summary: null
+        },
+        claude: {
+          agent: "claude",
+          available: true,
+          transport: "claude-print",
+          lastRunAt: null,
+          lastExitCode: null,
+          sessionId: null,
+          summary: null
+        }
+      }
+    },
+    paths
+  };
+}
+
 function parseToggleValue(value: string | null, label: string): boolean | undefined {
   if (!value) {
     return undefined;
@@ -199,6 +296,23 @@ function parseToggleValue(value: string | null, label: string): boolean | undefi
     return false;
   }
   throw new Error(`${label} must be one of: on, off, true, false, yes, no.`);
+}
+
+function parseMissionArenaSort(
+  value: string | null
+): "score" | "acceptance" | "health" | "risk" | "overlap" | "cost" {
+  if (
+    value === null ||
+    value === "score" ||
+    value === "acceptance" ||
+    value === "health" ||
+    value === "risk" ||
+    value === "overlap" ||
+    value === "cost"
+  ) {
+    return value ?? "score";
+  }
+  throw new Error("--by must be one of: score, acceptance, health, risk, overlap, cost.");
 }
 
 function parseRecommendationKind(value: string | null): RecommendationKind | "all" | null {
@@ -229,6 +343,65 @@ function parseRecommendationStatus(value: string | null): RecommendationStatus |
   }
 
   throw new Error(`Unsupported recommendation status "${value}".`);
+}
+
+function parseBrainCategory(
+  value: string | null
+):
+  | "all"
+  | "fact"
+  | "decision"
+  | "procedure"
+  | "risk"
+  | "artifact"
+  | "topology"
+  | "contract"
+  | "failure"
+  | "verification" {
+  if (
+    value === "fact" ||
+    value === "decision" ||
+    value === "procedure" ||
+    value === "risk" ||
+    value === "artifact" ||
+    value === "topology" ||
+    value === "contract" ||
+    value === "failure" ||
+    value === "verification"
+  ) {
+    return value;
+  }
+  return "all";
+}
+
+function parseBrainScope(
+  value: string | null
+): "all" | "repo" | "mission" | "personal" | "pattern" {
+  if (
+    value === "repo" ||
+    value === "mission" ||
+    value === "personal" ||
+    value === "pattern"
+  ) {
+    return value;
+  }
+  return "all";
+}
+
+function parseBrainGraphMode(
+  value: string | null
+): "all" | "structural" | "knowledge" | "topology" | "failure" | "contract" | "timeline" {
+  if (
+    value === "structural" ||
+    value === "knowledge" ||
+    value === "topology" ||
+    value === "failure" ||
+    value === "contract" ||
+    value === "timeline"
+  ) {
+    return value;
+  }
+  return "all";
 }
 
 async function readStdinText(): Promise<string> {
@@ -279,16 +452,43 @@ function renderUsage(): string {
     "  kavi summary [--json]",
     "  kavi result [--json]",
     "  kavi mission [mission-id|latest] [--json]",
+    "  kavi mission spec [mission-id|latest] [--json]",
+    "  kavi mission diff [mission-id|latest] [--from-version N] [--to-version N] [--prompt \"...\"] [--json]",
+    "  kavi mission simulate [mission-id|latest] [--json]",
+    "  kavi mission confidence [mission-id|latest] [--json]",
+    "  kavi mission digest [mission-id|latest] [--json]",
+    "  kavi mission morning-brief [mission-id|latest] [--hours N] [--json]",
+    "  kavi mission recover [mission-id|latest] [--retry-failed] [--resume-autopilot] [--reverify] [--all] [--json]",
     "  kavi mission shadow [mission-id|latest] --prompt \"...\" [--inspect] [--direct] [--json]",
+    "  kavi blueprint [mission-id|latest] [--prompt \"...\"] [--json]",
+    "  kavi blueprint diff [mission-id|latest] --prompt \"...\" [--json]",
+    "  kavi blueprint apply [mission-id|latest] --prompt \"...\" [--json]",
     "  kavi mission compare <left-mission-id|latest> <right-mission-id> [--json]",
-    "  kavi mission compare --family <mission-id|latest> [--json]",
+    "  kavi mission compare --family <mission-id|latest> [--by score|acceptance|health|risk|overlap|cost] [--json]",
+    "  kavi mission arena [mission-id|latest] [--by score|acceptance|health|risk|overlap|cost] [--json]",
     "  kavi mission select <mission-id|latest> [--json]",
-    "  kavi mission policy <mission-id|latest> [--guided|--autonomous|--overnight|--inspect] [--autopilot on|off] [--auto-verify on|off] [--auto-land on|off] [--pause-on-repair-failure on|off] [--retry-budget N] [--json]",
+    "  kavi mission policy <mission-id|latest> [--guided|--autonomous|--overnight|--inspect] [--autopilot on|off] [--auto-verify on|off] [--auto-land on|off] [--pause-on-repair-failure on|off] [--retry-budget N] [--attention-budget N] [--escalation strict|balanced|aggressive] [--json]",
     "  kavi missions [--json]",
-    "  kavi playback [mission-id|latest] [--json]",
+    "  kavi contracts [mission-id|latest] [--json] [--all]",
+    "  kavi contract-apply <contract-id> [--json]",
+    "  kavi contract-resolve <contract-id> [--task <task-id>] [--json]",
+    "  kavi contract-dismiss <contract-id> [--json]",
+    "  kavi receipts [mission-id|latest] [--timeline] [--json]",
+    "  kavi judge [mission-id|latest] [--json]",
+    "  kavi audit [mission-id|latest] [--json]",
+    "  kavi objections [mission-id|latest] [--json]",
+    "  kavi postmortem [mission-id|latest] [--json]",
+    "  kavi playback [mission-id|latest] [--phase all|spec|execution|repair|contracts|acceptance|landing|audit] [--json]",
     "  kavi accept [mission-id|latest] [--json]",
+    "  kavi accept suite [mission-id|latest] [--json]",
     "  kavi verify [mission-id|latest] [--json]",
-    "  kavi brain [--json] [--all] [--query \"...\"] [--path FILE] [--category fact|decision|procedure|risk|artifact] [--scope repo|mission|personal|pattern] [--mission <mission-id>] [--retired] [--explain <entry-id>] [--graph] [--entry <entry-id>]",
+    "  kavi verify [mission-id|latest] --explain",
+    "  kavi repair-plan [mission-id|latest] [--json]",
+    "  kavi failure-pack [mission-id|latest] [--json] [--check <acceptance-check-id>]",
+    "  kavi brain [--json] [--all] [--query \"...\"] [--path FILE] [--category fact|decision|procedure|risk|artifact|topology|contract|failure|verification] [--scope repo|mission|personal|pattern] [--mission <mission-id>] [--retired] [--explain <entry-id>] [--graph] [--mode all|structural|knowledge|topology|failure|contract|timeline] [--entry <entry-id>]",
+    "  kavi brain pack [--mission <mission-id|latest>] [--phase planning|implementation|repair|verification] [--path FILE] [--json]",
+    "  kavi brain review [--mission <mission-id|latest>] [--json] [--all]",
+    "  kavi brain distill [--mission <mission-id|latest>] [--category fact|decision|procedure|risk|artifact|topology|contract|failure|verification] [--scope repo|mission|personal|pattern] [--query \"...\"] [--apply] [--json]",
     "  kavi brain-pin <entry-id>",
     "  kavi brain-unpin <entry-id>",
     "  kavi brain-retire <entry-id>",
@@ -296,10 +496,14 @@ function renderUsage(): string {
     "  kavi patterns [--json] [--all] [--query \"...\"]",
     "  kavi patterns constellation [--json]",
     "  kavi patterns graph [--json]",
+    "  kavi patterns benchmark [--json]",
+    "  kavi patterns studio --prompt \"...\" [--template <template-id>]... [--json]",
+    "  kavi patterns compose --prompt \"...\" [--template <template-id>]... [--json]",
     "  kavi patterns templates [--json] [--query \"...\"]",
     "  kavi patterns rank <prompt> [--json]",
     "  kavi patterns apply <pattern-id> --prompt \"...\" [--json]",
     "  kavi patterns template-apply <template-id> --prompt \"...\" [--json]",
+    "  kavi portfolio [graph] [--json]",
     "  kavi status [--json]",
     "  kavi activity [--json] [--limit N]",
     "  kavi route [--json] [--no-ai] <prompt>",
@@ -647,6 +851,19 @@ async function ensureLandingAllowed(
     throw new Error(
       "Landing is blocked because the active mission has not passed acceptance yet. Run `kavi verify` after reviewing the result, then land once acceptance is cleared."
     );
+  }
+  if (mission) {
+    const audit = buildMissionAuditReport(session, mission, []);
+    if (auditBlocksShipping(audit)) {
+      const topObjections = audit?.objections
+        .filter((objection) => objection.severity === "critical")
+        .slice(0, 3)
+        .map((objection) => objection.title)
+        .join(" | ");
+      throw new Error(
+        `Landing is blocked by Quality Court: ${topObjections || audit?.summary || "release-blocking objections remain"}. Run \`kavi judge latest\` for full details.`
+      );
+    }
   }
 }
 
@@ -1208,7 +1425,7 @@ async function commandStatus(cwd: string, args: string[]): Promise<void> {
     );
     if (payload.activeMission.policy) {
       console.log(
-        `  policy: autonomy=${payload.activeMission.policy.autonomyLevel} approvals=${payload.activeMission.policy.approvalMode} retry=${payload.activeMission.policy.retryBudget} verify=${payload.activeMission.policy.autoVerify ? "auto" : "manual"} land=${payload.activeMission.policy.autoLand ? "auto" : "manual"} pause-on-repair-failure=${payload.activeMission.policy.pauseOnRepairFailure ? "yes" : "no"}`
+        `  policy: autonomy=${payload.activeMission.policy.autonomyLevel} approvals=${payload.activeMission.policy.approvalMode} retry=${payload.activeMission.policy.retryBudget} attention=${payload.activeMission.policy.operatorAttentionBudget} escalation=${payload.activeMission.policy.escalationPolicy} verify=${payload.activeMission.policy.autoVerify ? "auto" : "manual"} land=${payload.activeMission.policy.autoLand ? "auto" : "manual"} pause-on-repair-failure=${payload.activeMission.policy.pauseOnRepairFailure ? "yes" : "no"}`
       );
     }
   }
@@ -1447,10 +1664,688 @@ async function commandResult(cwd: string, args: string[]): Promise<void> {
   }
 }
 
+async function commandBlueprint(cwd: string, args: string[]): Promise<void> {
+  const subcommand = args[0];
+
+  if (subcommand === "diff" || subcommand === "apply") {
+    const { paths } = await requireSession(cwd);
+    const rpcSnapshot = await tryRpcSnapshot(paths);
+    const session = rpcSnapshot?.session ?? (await loadSessionRecord(paths));
+    syncMissionStates(session);
+    const missionId = resolveRequestedMissionId(
+      [args[1] ?? "latest"],
+      session.missions
+        .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+        .map((mission) => mission.id)
+    );
+    const mission = session.missions.find((item) => item.id === missionId) ?? null;
+    if (!mission) {
+      throw new Error(`Mission ${missionId} was not found.`);
+    }
+    const prompt = getOptionalFilter(args, "--prompt");
+    if (!prompt?.trim()) {
+      throw new Error(`blueprint ${subcommand} requires --prompt.`);
+    }
+
+    const preview = buildBlueprintPreview(session, prompt);
+    const diff = diffMissionBlueprint(mission, preview);
+
+    if (subcommand === "apply") {
+      await ensureMutableActionAllowed(paths, session, "Applying a mission blueprint");
+      if (rpcSnapshot) {
+        await rpcApplyMissionBlueprint(paths, {
+          missionId: mission.id,
+          prompt
+        });
+      } else {
+        const updated = applyMissionBlueprint(session, mission.id, prompt);
+        if (!updated) {
+          throw new Error(`Mission ${mission.id} was not found.`);
+        }
+        addDecisionRecord(session, {
+          kind: "plan",
+          agent: "router",
+          taskId: updated.rootTaskId ?? updated.planningTaskId ?? null,
+          summary: `Updated mission blueprint for ${updated.id}`,
+          detail: "Operator applied a new blueprint/spec prompt to the mission.",
+          metadata: {
+            missionId: updated.id,
+            prompt
+          }
+        });
+        addMissionCheckpoint(session, updated.id, {
+          kind: "task_progress",
+          title: "Mission blueprint updated",
+          detail: "Operator updated the mission blueprint and reset acceptance to match the new intent.",
+          taskId: updated.rootTaskId ?? updated.planningTaskId ?? null
+        });
+        await saveSessionRecord(paths, session);
+        await recordEvent(paths, session.id, "mission.blueprint_applied", {
+          missionId: updated.id
+        });
+        await rpcNotifyExternalUpdate(paths, "mission.blueprint_applied").catch(() => {});
+      }
+    }
+
+    const payload = {
+      missionId: mission.id,
+      preview,
+      diff
+    };
+    if (args.includes("--json")) {
+      console.log(JSON.stringify(payload, null, 2));
+      return;
+    }
+
+    console.log(`Mission blueprint ${subcommand}: ${mission.id}`);
+    console.log(`Prompt changed: ${diff.promptChanged ? "yes" : "no"}`);
+    console.log(`Workstreams added: ${diff.spec.workstreamKinds.added.join(", ") || "-"}`);
+    console.log(`Workstreams removed: ${diff.spec.workstreamKinds.removed.join(", ") || "-"}`);
+    console.log(`Stacks added: ${diff.spec.stackHints.added.join(", ") || "-"}`);
+    console.log(`Roles added: ${diff.spec.userRoles.added.join(", ") || "-"}`);
+    console.log(`Entities added: ${diff.spec.domainEntities.added.join(", ") || "-"}`);
+    console.log(`Service boundaries added: ${diff.blueprint.serviceBoundaries.added.join(", ") || "-"}`);
+    console.log(`UI surfaces added: ${diff.blueprint.uiSurfaces.added.join(", ") || "-"}`);
+    console.log(`Journeys added: ${diff.blueprint.acceptanceJourneys.added.join(" | ") || "-"}`);
+    console.log(`Policy fields changed: ${diff.policy.changedFields.join(", ") || "-"}`);
+    console.log(`Simulation: attention=${preview.simulation?.attentionCost ?? 0}/${preview.simulation?.attentionBudget ?? 0} | escalation=${preview.simulation?.escalationPressure ?? "-"} | verification=${preview.simulation?.verificationCoverage ?? "-"} | contracts=${preview.simulation?.contractCoverage ?? "-"}`);
+    if (subcommand === "apply") {
+      console.log("Applied blueprint prompt to the mission.");
+    }
+    return;
+  }
+
+  const prompt = getOptionalFilter(args, "--prompt");
+  if (prompt?.trim()) {
+    const { session } = await buildBlueprintPreviewSession(cwd);
+    const preview = buildBlueprintPreview(session, prompt);
+    const payload = {
+      prompt: preview.prompt,
+      spec: preview.spec,
+      contract: preview.contract,
+      blueprint: preview.blueprint,
+      policy: preview.policy,
+      risks: preview.risks,
+      anchors: preview.anchors,
+      simulation: preview.simulation
+    };
+    if (args.includes("--json")) {
+      console.log(JSON.stringify(payload, null, 2));
+      return;
+    }
+    console.log("Blueprint preview:");
+    console.log(`Product concept: ${preview.blueprint.productConcept}`);
+    console.log(`Overview: ${preview.blueprint.overview}`);
+    console.log(`Workstreams: ${preview.spec.workstreamKinds.join(", ") || "-"}`);
+    console.log(`Stacks: ${preview.spec.stackHints.join(", ") || "-"}`);
+    console.log(`Roles: ${preview.blueprint.personas.join(", ") || "-"}`);
+    console.log(`Entities: ${preview.blueprint.domainModel.join(", ") || "-"}`);
+    console.log(`Service boundaries: ${preview.blueprint.serviceBoundaries.join(", ") || "-"}`);
+    console.log(`UI surfaces: ${preview.blueprint.uiSurfaces.join(", ") || "-"}`);
+    console.log(`Journeys: ${preview.blueprint.acceptanceJourneys.join(" | ") || "-"}`);
+    console.log(`Simulation: attention=${preview.simulation?.attentionCost ?? 0}/${preview.simulation?.attentionBudget ?? 0} | parallelism=${preview.simulation?.estimatedParallelism ?? 1} | escalation=${preview.simulation?.escalationPressure ?? "-"} | verification=${preview.simulation?.verificationCoverage ?? "-"} | contracts=${preview.simulation?.contractCoverage ?? "-"}`);
+    return;
+  }
+
+  const { paths } = await requireSession(cwd);
+  const session = await loadSessionRecord(paths);
+  syncMissionStates(session);
+  const missionId = resolveRequestedMissionId(
+    [args[0] ?? "latest"],
+    session.missions
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+      .map((mission) => mission.id)
+  );
+  const mission = session.missions.find((item) => item.id === missionId) ?? null;
+  if (!mission) {
+    throw new Error(`Mission ${missionId} was not found.`);
+  }
+  const payload = {
+    missionId: mission.id,
+    title: mission.title,
+    blueprint: mission.blueprint ?? null,
+    spec: mission.spec ?? null,
+    contract: mission.contract ?? null,
+    simulation: mission.simulation ?? null,
+    revisions: mission.specRevisions ?? []
+  };
+  if (args.includes("--json")) {
+    console.log(JSON.stringify(payload, null, 2));
+    return;
+  }
+
+  console.log(`Mission blueprint: ${mission.id}`);
+  console.log(`Title: ${mission.title}`);
+  console.log(`Product concept: ${mission.blueprint?.productConcept ?? "-"}`);
+  console.log(`Overview: ${mission.blueprint?.overview ?? "-"}`);
+  console.log(`Workstreams: ${mission.spec?.workstreamKinds.join(", ") || "-"}`);
+  console.log(`Stacks: ${mission.spec?.stackHints.join(", ") || "-"}`);
+  console.log(`Roles: ${mission.blueprint?.personas.join(", ") || "-"}`);
+  console.log(`Entities: ${mission.blueprint?.domainModel.join(", ") || "-"}`);
+  console.log(`Service boundaries: ${mission.blueprint?.serviceBoundaries.join(", ") || "-"}`);
+  console.log(`UI surfaces: ${mission.blueprint?.uiSurfaces.join(", ") || "-"}`);
+  console.log(`Journeys: ${mission.blueprint?.acceptanceJourneys.join(" | ") || "-"}`);
+  console.log(`Spec revisions: ${(mission.specRevisions ?? []).length}`);
+}
+
 async function commandMission(cwd: string, args: string[]): Promise<void> {
-  if (args[0] === "compare") {
+  if (
+    args[0] === "spec" ||
+    args[0] === "diff" ||
+    args[0] === "simulate" ||
+    args[0] === "confidence" ||
+    args[0] === "digest" ||
+    args[0] === "morning-brief" ||
+    args[0] === "recover"
+  ) {
+    const subcommand = args[0];
+    const { paths } = await requireSession(cwd);
+    const rpcSnapshot = await tryRpcSnapshot(paths);
+    const session = rpcSnapshot?.session ?? (await loadSessionRecord(paths));
+    syncMissionStates(session);
+    const snapshot = rpcSnapshot ?? {
+      session,
+      approvals: await listApprovalRequests(paths).catch(() => []),
+      events: await readRecentEvents(paths, 50),
+      worktreeDiffs: [],
+      latestLandReport: await loadLatestLandReport(paths)
+    };
+    if (!rpcSnapshot) {
+      const changedByAgent = await Promise.all(
+        (["codex", "claude"] as const).map(async (agent) => ({
+          agent,
+          paths: await listWorktreeChangedPaths(paths, agent).catch(() => [])
+        }))
+      );
+      snapshot.worktreeDiffs = changedByAgent;
+    }
+    const artifacts = await listTaskArtifacts(paths);
+    const missionId = resolveRequestedMissionId(
+      [args[1] ?? "latest"],
+      session.missions
+        .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+        .map((mission) => mission.id)
+    );
+    const mission = session.missions.find((item) => item.id === missionId) ?? null;
+    if (!mission) {
+      throw new Error(`Mission ${missionId} was not found.`);
+    }
+
+    if (subcommand === "spec") {
+      const payload = {
+        missionId: mission.id,
+        title: mission.title,
+        phase: mission.phase ?? "executing",
+        prompt: mission.prompt,
+        spec: mission.spec ?? null,
+        contract: mission.contract ?? null,
+        blueprint: mission.blueprint ?? null,
+        revisions: mission.specRevisions ?? []
+      };
+      if (args.includes("--json")) {
+        console.log(JSON.stringify(payload, null, 2));
+        return;
+      }
+      console.log(`Mission spec: ${mission.id}`);
+      console.log(`Title: ${mission.title}`);
+      console.log(`Phase: ${mission.phase ?? "-"}`);
+      console.log(`Prompt: ${mission.prompt}`);
+      console.log(`Workstreams: ${mission.spec?.workstreamKinds.join(", ") || "-"}`);
+      console.log(`Stack hints: ${mission.spec?.stackHints.join(", ") || "-"}`);
+      console.log(`Deliverables: ${mission.spec?.requestedDeliverables.join(", ") || "-"}`);
+      console.log(`Scenarios: ${mission.contract?.scenarios.join(" | ") || "-"}`);
+      console.log(`Blueprint concept: ${mission.blueprint?.productConcept ?? "-"}`);
+      console.log("Spec revisions:");
+      for (const revision of mission.specRevisions ?? []) {
+        console.log(`- v${revision.version} | ${revision.createdAt} | ${revision.summary}`);
+      }
+      return;
+    }
+
+    if (subcommand === "diff") {
+      const prompt = getOptionalFilter(args, "--prompt");
+      const fromVersionRaw = getOptionalFilter(args, "--from-version");
+      const toVersionRaw = getOptionalFilter(args, "--to-version");
+      const fromVersion = fromVersionRaw ? Number.parseInt(fromVersionRaw, 10) : null;
+      const toVersion = toVersionRaw ? Number.parseInt(toVersionRaw, 10) : null;
+      if ((fromVersionRaw && !Number.isFinite(fromVersion)) || (toVersionRaw && !Number.isFinite(toVersion))) {
+        throw new Error("Mission diff versions must be valid integers.");
+      }
+
+      const revisions = [...(mission.specRevisions ?? [])].sort((left, right) => left.version - right.version);
+      let diff: ReturnType<typeof diffMissionBlueprint>;
+      let descriptor: Record<string, unknown>;
+
+      if (prompt?.trim()) {
+        const preview = buildBlueprintPreview(session, prompt);
+        diff = diffMissionBlueprint(mission, preview);
+        descriptor = {
+          mode: "prompt_preview",
+          from: {
+            version: revisions.at(-1)?.version ?? null,
+            prompt: mission.prompt
+          },
+          to: {
+            version: null,
+            prompt: prompt.trim()
+          }
+        };
+      } else {
+        const targetRevision =
+          toVersion !== null
+            ? revisions.find((revision) => revision.version === toVersion) ?? null
+            : revisions.at(-1) ?? null;
+        if (!targetRevision) {
+          throw new Error("No mission spec revisions are available to diff.");
+        }
+        const sourceRevision =
+          fromVersion !== null
+            ? revisions.find((revision) => revision.version === fromVersion) ?? null
+            : revisions.at(-2) ?? null;
+        if (!sourceRevision) {
+          throw new Error("Mission diff requires at least two spec revisions, or pass --prompt to compare against a draft.");
+        }
+        diff = diffMissionPrompts(session, sourceRevision.prompt, targetRevision.prompt);
+        descriptor = {
+          mode: "revision_compare",
+          from: sourceRevision,
+          to: targetRevision
+        };
+      }
+
+      const payload = {
+        missionId: mission.id,
+        title: mission.title,
+        ...descriptor,
+        diff
+      };
+      if (args.includes("--json")) {
+        console.log(JSON.stringify(payload, null, 2));
+        return;
+      }
+
+      console.log(`Mission diff: ${mission.id}`);
+      if (payload.mode === "prompt_preview") {
+        console.log(`Against prompt preview: ${(payload.to as { prompt: string }).prompt}`);
+      } else {
+        const from = payload.from as { version: number; createdAt: string; summary: string };
+        const to = payload.to as { version: number; createdAt: string; summary: string };
+        console.log(`From v${from.version} (${from.createdAt}) -> v${to.version} (${to.createdAt})`);
+        console.log(`  ${from.summary} -> ${to.summary}`);
+      }
+      console.log(`Prompt changed: ${diff.promptChanged ? "yes" : "no"}`);
+      console.log(`Workstreams added: ${diff.spec.workstreamKinds.added.join(", ") || "-"}`);
+      console.log(`Workstreams removed: ${diff.spec.workstreamKinds.removed.join(", ") || "-"}`);
+      console.log(`Stacks added: ${diff.spec.stackHints.added.join(", ") || "-"}`);
+      console.log(`Roles added: ${diff.spec.userRoles.added.join(", ") || "-"}`);
+      console.log(`Entities added: ${diff.spec.domainEntities.added.join(", ") || "-"}`);
+      console.log(`Scenarios added: ${diff.contract.scenarios.added.join(" | ") || "-"}`);
+      console.log(`Acceptance added: ${diff.contract.acceptanceCriteria.added.join(" | ") || "-"}`);
+      console.log(`UI surfaces added: ${diff.blueprint.uiSurfaces.added.join(" | ") || "-"}`);
+      console.log(`Service boundaries added: ${diff.blueprint.serviceBoundaries.added.join(" | ") || "-"}`);
+      console.log(`Policy changed fields: ${diff.policy.changedFields.join(", ") || "-"}`);
+      console.log(`Risks added: ${diff.risks.added.join(" | ") || "-"}`);
+      console.log(`Risks removed: ${diff.risks.removed.join(" | ") || "-"}`);
+      return;
+    }
+
+    if (subcommand === "confidence") {
+      const payload = buildMissionConfidence(snapshot, artifacts, mission);
+      if (args.includes("--json")) {
+        console.log(JSON.stringify(payload, null, 2));
+        return;
+      }
+      if (!payload) {
+        console.log("No mission confidence available.");
+        return;
+      }
+      console.log(`Mission confidence: ${mission.id}`);
+      console.log(`Score: ${payload.score} | state=${payload.state} | autopilot=${payload.canAutopilot ? "safe" : "gated"}`);
+      console.log("Blockers:");
+      for (const blocker of payload.blockers) {
+        console.log(`- ${blocker}`);
+      }
+      if (payload.blockers.length === 0) {
+        console.log("- none");
+      }
+      console.log("Warnings:");
+      for (const warning of payload.warnings) {
+        console.log(`- ${warning}`);
+      }
+      if (payload.warnings.length === 0) {
+        console.log("- none");
+      }
+      console.log("Strengths:");
+      for (const strength of payload.strengths) {
+        console.log(`- ${strength}`);
+      }
+      if (payload.strengths.length === 0) {
+        console.log("- none");
+      }
+      return;
+    }
+
+    if (subcommand === "digest") {
+      const payload = buildMissionDigest(snapshot, artifacts, mission);
+      if (args.includes("--json")) {
+        console.log(JSON.stringify(payload, null, 2));
+        return;
+      }
+      if (!payload) {
+        console.log("No mission digest available.");
+        return;
+      }
+      console.log(`Mission digest: ${payload.missionId}`);
+      console.log(`Title: ${payload.title}`);
+      console.log(`Headline: ${payload.headline}`);
+      console.log(`Confidence: ${payload.confidence.state} (${payload.confidence.score})`);
+      console.log("Summary:");
+      for (const line of payload.summary) {
+        console.log(`- ${line}`);
+      }
+      console.log("Recovery:");
+      console.log(`- ${payload.recoveryPlan.summary}`);
+      if (payload.recoveryPlan.blockers.length > 0) {
+        console.log(`- blockers: ${payload.recoveryPlan.blockers.join(" | ")}`);
+      }
+      if (payload.recoveryPlan.actions.length > 0) {
+        console.log("- actions:");
+        for (const action of payload.recoveryPlan.actions) {
+          console.log(
+            `  ${action.recommended ? "*" : "-"} ${action.title}${action.command ? ` | ${action.command}` : ""}`
+          );
+        }
+      }
+      if (payload.recentReceipts.length > 0) {
+        console.log("Recent receipts:");
+        for (const receipt of payload.recentReceipts) {
+          console.log(`- ${receipt.owner} | ${receipt.title} | ${receipt.summary}`);
+        }
+      }
+      if (payload.openContracts.length > 0) {
+        console.log("Open contracts:");
+        for (const contract of payload.openContracts) {
+          console.log(`- ${contract.targetAgent} | ${contract.kind} | ${contract.title}`);
+        }
+      }
+      if (payload.activeRepairPlans.length > 0) {
+        console.log("Repair plans:");
+        for (const repairPlan of payload.activeRepairPlans) {
+          console.log(`- ${repairPlan.owner} | ${repairPlan.summary}`);
+        }
+      }
+      return;
+    }
+
+    if (subcommand === "morning-brief") {
+      const hours = Number.parseInt(getOptionalFilter(args, "--hours") ?? "", 10);
+      const payload = buildMissionMorningBrief(
+        snapshot,
+        artifacts,
+        mission,
+        Number.isFinite(hours) && hours > 0 ? hours : 12
+      );
+      if (args.includes("--json")) {
+        console.log(JSON.stringify(payload, null, 2));
+        return;
+      }
+      if (!payload) {
+        console.log("No mission morning brief available.");
+        return;
+      }
+      console.log(`Mission morning brief: ${payload.missionId}`);
+      console.log(`Title: ${payload.title}`);
+      console.log(`Window: last ${payload.windowHours}h`);
+      console.log(`Headline: ${payload.headline}`);
+      console.log("Summary:");
+      for (const line of payload.summary) {
+        console.log(`- ${line}`);
+      }
+      console.log("Completed tasks:");
+      for (const item of payload.completedTasks) {
+        console.log(`- ${item.owner} | ${item.title} | ${item.summary}`);
+      }
+      if (payload.completedTasks.length === 0) {
+        console.log("- none");
+      }
+      console.log("Failed tasks:");
+      for (const item of payload.failedTasks) {
+        console.log(`- ${item.owner} | ${item.title} | ${item.summary}`);
+      }
+      if (payload.failedTasks.length === 0) {
+        console.log("- none");
+      }
+      console.log("Resolved contracts:");
+      for (const item of payload.resolvedContracts) {
+        console.log(`- ${item.targetAgent} | ${item.kind} | ${item.title}`);
+      }
+      if (payload.resolvedContracts.length === 0) {
+        console.log("- none");
+      }
+      console.log("Open contracts:");
+      for (const item of payload.openContracts) {
+        console.log(`- ${item.targetAgent} | ${item.kind} | ${item.title}`);
+      }
+      if (payload.openContracts.length === 0) {
+        console.log("- none");
+      }
+      console.log("First actions:");
+      for (const item of payload.firstActions) {
+        console.log(`- ${item}`);
+      }
+      if (payload.firstActions.length === 0) {
+        console.log("- none");
+      }
+      return;
+    }
+
+    if (subcommand === "recover") {
+      const recoveryPlan = buildMissionRecoveryPlan(snapshot, artifacts, mission);
+      if (!recoveryPlan) {
+        throw new Error(`Mission ${mission.id} was not found.`);
+      }
+
+      const retryFailed = args.includes("--retry-failed");
+      const resumeAutopilot = args.includes("--resume-autopilot");
+      const reverify = args.includes("--reverify");
+      const applyAll = args.includes("--all");
+
+      const requestedRetry =
+        retryFailed || applyAll
+          ? recoveryPlan.actions.find((action) => action.kind === "retry_task" && action.safeToAutoApply)
+          : null;
+      const requestedResumeAutopilot =
+        resumeAutopilot || applyAll
+          ? recoveryPlan.actions.find((action) => action.kind === "resume_autopilot" && action.safeToAutoApply)
+          : null;
+      const requestedVerification =
+        reverify || applyAll
+          ? recoveryPlan.actions.find((action) => action.kind === "run_verification" && action.safeToAutoApply)
+          : null;
+
+      if (retryFailed && !requestedRetry) {
+        throw new Error("No safe retry recovery action is currently available for this mission.");
+      }
+      if (resumeAutopilot && !requestedResumeAutopilot) {
+        throw new Error("No safe autopilot-resume recovery action is currently available for this mission.");
+      }
+      if (reverify && !requestedVerification) {
+        throw new Error("No safe verification recovery action is currently available for this mission.");
+      }
+
+      if (requestedRetry) {
+        const taskId = requestedRetry.taskId;
+        if (!taskId) {
+          throw new Error("Recovery retry action did not include a task id.");
+        }
+        const currentSnapshot = await tryRpcSnapshot(paths);
+        const currentSession = currentSnapshot?.session ?? (await loadSessionRecord(paths));
+        await ensureMutableActionAllowed(paths, currentSession, "Recovering a mission by retrying failed work");
+        if (currentSnapshot) {
+          await rpcRetryTask(paths, taskId);
+        } else {
+          const task = currentSession.tasks.find((item) => item.id === taskId) ?? null;
+          if (!task) {
+            throw new Error(`Task ${taskId} could not be found for mission recovery.`);
+          }
+          markTaskForManualRetry(task);
+          addDecisionRecord(currentSession, {
+            kind: "task",
+            agent: task.owner === "claude" ? "claude" : "codex",
+            taskId: task.id,
+            summary: `Recovery retry for ${task.title}`,
+            detail: "Mission recovery reset the latest failed or blocked task for another attempt.",
+            metadata: {
+              missionId: task.missionId,
+              recoveryAction: "retry_task"
+            }
+          });
+          addMissionCheckpoint(currentSession, task.missionId, {
+            kind: "task_recovered",
+            title: "Mission recovery retried a task",
+            detail: `Kavi retried ${task.title} during mission recovery.`,
+            taskId: task.id
+          });
+          const artifact = await loadTaskArtifact(paths, task.id);
+          if (artifact) {
+            artifact.status = "pending";
+            artifact.retryCount = task.retryCount;
+            artifact.lastFailureSummary = null;
+            artifact.summary = task.summary;
+            await saveTaskArtifact(paths, artifact);
+          }
+          syncMissionStates(currentSession);
+          await saveSessionRecord(paths, currentSession);
+          await recordEvent(paths, currentSession.id, "mission.recovery_retry", {
+            missionId: mission.id,
+            taskId: task.id
+          });
+          await notifyOperatorSurface(paths, "mission.recovery_retry");
+        }
+      }
+
+      if (requestedResumeAutopilot) {
+        const currentSnapshot = await tryRpcSnapshot(paths);
+        const currentSession = currentSnapshot?.session ?? (await loadSessionRecord(paths));
+        await ensureMutableActionAllowed(paths, currentSession, "Recovering a mission by resuming autopilot");
+        if (currentSnapshot) {
+          await rpcUpdateMissionPolicy(paths, {
+            missionId: mission.id,
+            autonomyLevel: mission.policy?.autonomyLevel === "inspect" ? "guided" : undefined,
+            autopilotEnabled: true
+          });
+        } else {
+          const updated = updateMissionPolicy(currentSession, mission.id, {
+            autonomyLevel: mission.policy?.autonomyLevel === "inspect" ? "guided" : undefined,
+            autopilotEnabled: true
+          });
+          if (!updated) {
+            throw new Error(`Mission ${mission.id} was not found.`);
+          }
+          await saveSessionRecord(paths, currentSession);
+          await recordEvent(paths, currentSession.id, "mission.recovery_autopilot_resumed", {
+            missionId: mission.id
+          });
+          await rpcNotifyExternalUpdate(paths, "mission.recovery_autopilot_resumed").catch(() => {});
+        }
+      }
+
+      let reverifiedMission: Awaited<ReturnType<typeof verifyMissionAcceptanceById>> | null = null;
+      if (requestedVerification) {
+        const currentSession = await loadSessionRecord(paths);
+        await ensureMutableActionAllowed(paths, currentSession, "Recovering a mission by running verification");
+        reverifiedMission = await verifyMissionAcceptanceById(paths, mission.id);
+        await rpcNotifyExternalUpdate(paths, "mission.recovery_reverified").catch(() => {});
+      }
+
+      const payload = {
+        recoveryPlan,
+        appliedActions: {
+          retryTaskId: requestedRetry?.taskId ?? null,
+          resumedAutopilot: Boolean(requestedResumeAutopilot),
+          reverified: Boolean(requestedVerification),
+          acceptanceStatus: reverifiedMission?.acceptance.status ?? null
+        }
+      };
+
+      if (args.includes("--json")) {
+        console.log(JSON.stringify(payload, null, 2));
+        return;
+      }
+
+      console.log(`Mission recovery: ${mission.id}`);
+      console.log(`Status: ${recoveryPlan.status}`);
+      console.log(`Summary: ${recoveryPlan.summary}`);
+      if (recoveryPlan.blockers.length > 0) {
+        console.log(`Blockers: ${recoveryPlan.blockers.join(" | ")}`);
+      }
+      console.log("Actions:");
+      for (const action of recoveryPlan.actions) {
+        const marker = action.recommended ? "*" : "-";
+        console.log(`${marker} ${action.title}${action.command ? ` | ${action.command}` : ""}`);
+      }
+      if (recoveryPlan.actions.length === 0) {
+        console.log("- none");
+      }
+      if (requestedRetry || requestedResumeAutopilot || requestedVerification) {
+        console.log("Applied:");
+        if (requestedRetry?.taskId) {
+          console.log(`- retried task ${requestedRetry.taskId}`);
+        }
+        if (requestedResumeAutopilot) {
+          console.log("- resumed autopilot");
+        }
+        if (requestedVerification) {
+          console.log(`- reverified acceptance (${reverifiedMission?.acceptance.status ?? "unknown"})`);
+        }
+      }
+      return;
+    }
+
+    const payload = {
+      missionId: mission.id,
+      title: mission.title,
+      phase: mission.phase ?? "executing",
+      simulation: mission.simulation ?? null
+    };
+    if (args.includes("--json")) {
+      console.log(JSON.stringify(payload, null, 2));
+      return;
+    }
+    console.log(`Mission simulation: ${mission.id}`);
+    console.log(`Phase: ${mission.phase ?? "-"}`);
+    console.log(`Attention cost: ${mission.simulation?.attentionCost ?? 0}/${mission.simulation?.attentionBudget ?? 0}`);
+    console.log(`Escalation pressure: ${mission.simulation?.escalationPressure ?? "-"}`);
+    console.log(`Autopilot viable: ${mission.simulation?.autopilotViable ? "yes" : "no"}`);
+    console.log(`Gate pressure: ${mission.simulation?.gatePressure ?? 0}`);
+    console.log(`Open contracts: ${mission.simulation?.contractRequestCount ?? 0}`);
+    console.log(`Seriality score: ${mission.simulation?.serialityScore ?? 0}`);
+    console.log(`Estimated parallelism: ${mission.simulation?.estimatedParallelism ?? 1}`);
+    console.log(`Verification coverage: ${mission.simulation?.verificationCoverage ?? "-"}`);
+    console.log(`Contract coverage: ${mission.simulation?.contractCoverage ?? "-"}`);
+    if ((mission.simulation?.escalationReasons ?? []).length > 0) {
+      console.log("Escalation reasons:");
+      for (const reason of mission.simulation?.escalationReasons ?? []) {
+        console.log(`- ${reason}`);
+      }
+    }
+    console.log("Issues:");
+    for (const issue of mission.simulation?.issues ?? []) {
+      console.log(`- ${issue.severity} | ${issue.kind} | ${issue.title}`);
+      console.log(`  ${issue.detail}`);
+    }
+    console.log("Recommendations:");
+    for (const recommendation of mission.simulation?.recommendations ?? []) {
+      console.log(`- ${recommendation}`);
+    }
+    return;
+  }
+
+  if (args[0] === "compare" || args[0] === "arena") {
     const compareFlags = args.slice(1);
     const familyTarget = getOptionalFilter(compareFlags, "--family");
+    const sortBy = parseMissionArenaSort(getOptionalFilter(compareFlags, "--by"));
+    const arenaMode = args[0] === "arena";
     const { paths } = await requireSession(cwd);
     const session = await loadSessionRecord(paths);
     syncMissionStates(session);
@@ -1466,21 +2361,25 @@ async function commandMission(cwd: string, args: string[]): Promise<void> {
       latestLandReport: null
     };
 
-    if (familyTarget) {
-      const focusMissionId = resolveRequestedMissionId([familyTarget], missionCandidates);
+    if (familyTarget || arenaMode) {
+      const arenaArgs = compareFlags.filter((arg) => !arg.startsWith("--"));
+      const requestedFocus = familyTarget ?? arenaArgs[0] ?? "latest";
+      const focusMissionId = resolveRequestedMissionId([requestedFocus], missionCandidates);
       const focusMission = session.missions.find((item) => item.id === focusMissionId) ?? null;
       if (!focusMission) {
         throw new Error(`Mission ${focusMissionId} could not be found for comparison.`);
       }
 
-      const comparisons = compareMissionFamily(snapshot, focusMission, artifacts);
+      const comparisons = compareMissionFamily(snapshot, focusMission, artifacts, sortBy);
       const payload = {
         focusMission,
+        sortBy,
         comparisons: comparisons.map((comparison) => ({
           alternativeMission: comparison.rightMission,
           focusScore: comparison.leftScore,
           alternativeScore: comparison.rightScore,
           scoreDelta: comparison.rightScore - comparison.leftScore,
+          sortValue: arenaSortValue(comparison, sortBy),
           preferredMissionId: comparison.preferredMissionId,
           changedPathOverlap: comparison.changedPathOverlap,
           focusOnlyPaths: comparison.leftOnlyPaths,
@@ -1499,13 +2398,13 @@ async function commandMission(cwd: string, args: string[]): Promise<void> {
 
       console.log(`Focus mission: ${focusMission.id} | ${focusMission.title}`);
       if (comparisons.length === 0) {
-        console.log("No related shadow or sibling missions found.");
+        console.log(arenaMode ? "No shadow strategies found." : "No related shadow or sibling missions found.");
         return;
       }
-      console.log("Shadow family:");
+      console.log(arenaMode ? `Shadow arena ranked by ${sortBy}:` : `Shadow family ranked by ${sortBy}:`);
       for (const comparison of comparisons) {
         console.log(
-          `- ${comparison.rightMission.id} | score=${comparison.rightScore} vs focus=${comparison.leftScore} | preferred=${comparison.preferredMissionId ?? "tie"}`
+          `- ${comparison.rightMission.id} | sort=${arenaSortValue(comparison, sortBy)} | score=${comparison.rightScore} vs focus=${comparison.leftScore} | preferred=${comparison.preferredMissionId ?? "tie"}`
         );
         console.log(
           `  acceptance=${comparison.rightMission.acceptance.status} | health=${comparison.rightMission.health?.state ?? "-"} (${comparison.rightMission.health?.score ?? "-"}) | overlap=${comparison.changedPathOverlap.join(", ") || "-"}`
@@ -1713,13 +2612,25 @@ async function commandMission(cwd: string, args: string[]): Promise<void> {
       retryBudgetRaw === null
         ? undefined
         : Math.max(0, Math.min(5, Number.parseInt(retryBudgetRaw, 10)));
+    const attentionBudgetRaw = getOptionalFilter(args, "--attention-budget");
+    const attentionBudget =
+      attentionBudgetRaw === null
+        ? undefined
+        : Math.max(0, Math.min(20, Number.parseInt(attentionBudgetRaw, 10)));
+    const escalationPolicyRaw = getOptionalFilter(args, "--escalation");
+    const escalationPolicy =
+      escalationPolicyRaw === "strict" || escalationPolicyRaw === "balanced" || escalationPolicyRaw === "aggressive"
+        ? escalationPolicyRaw
+        : undefined;
     const shouldMutate =
       autonomyLevel !== undefined ||
       typeof autopilotEnabled === "boolean" ||
       typeof autoVerify === "boolean" ||
       typeof autoLand === "boolean" ||
       typeof pauseOnRepairFailure === "boolean" ||
-      typeof retryBudget === "number";
+      typeof retryBudget === "number" ||
+      typeof attentionBudget === "number" ||
+      escalationPolicy !== undefined;
 
     if (shouldMutate) {
       if (isSessionLive(session) && (await pingRpc(paths))) {
@@ -1731,7 +2642,9 @@ async function commandMission(cwd: string, args: string[]): Promise<void> {
           ...(typeof autoVerify === "boolean" ? { autoVerify } : {}),
           ...(typeof autoLand === "boolean" ? { autoLand } : {}),
           ...(typeof pauseOnRepairFailure === "boolean" ? { pauseOnRepairFailure } : {}),
-          ...(typeof retryBudget === "number" && Number.isFinite(retryBudget) ? { retryBudget } : {})
+          ...(typeof retryBudget === "number" && Number.isFinite(retryBudget) ? { retryBudget } : {}),
+          ...(typeof attentionBudget === "number" && Number.isFinite(attentionBudget) ? { operatorAttentionBudget: attentionBudget } : {}),
+          ...(escalationPolicy ? { escalationPolicy } : {})
         });
       } else {
         const updated = updateMissionPolicy(session, mission.id, {
@@ -1740,7 +2653,9 @@ async function commandMission(cwd: string, args: string[]): Promise<void> {
           ...(typeof autoVerify === "boolean" ? { autoVerify } : {}),
           ...(typeof autoLand === "boolean" ? { autoLand } : {}),
           ...(typeof pauseOnRepairFailure === "boolean" ? { pauseOnRepairFailure } : {}),
-          ...(typeof retryBudget === "number" && Number.isFinite(retryBudget) ? { retryBudget } : {})
+          ...(typeof retryBudget === "number" && Number.isFinite(retryBudget) ? { retryBudget } : {}),
+          ...(typeof attentionBudget === "number" && Number.isFinite(attentionBudget) ? { operatorAttentionBudget: attentionBudget } : {}),
+          ...(escalationPolicy ? { escalationPolicy } : {})
         });
         if (!updated) {
           throw new Error(`Mission ${mission.id} was not found.`);
@@ -1750,7 +2665,7 @@ async function commandMission(cwd: string, args: string[]): Promise<void> {
           agent: "router",
           taskId: updated.rootTaskId ?? updated.planningTaskId ?? null,
           summary: `Updated mission policy for ${updated.id}`,
-          detail: `autonomy=${updated.policy?.autonomyLevel ?? "-"} | retry=${updated.policy?.retryBudget ?? "-"} | autoVerify=${updated.policy?.autoVerify ? "on" : "off"} | autoLand=${updated.policy?.autoLand ? "on" : "off"} | pauseOnRepairFailure=${updated.policy?.pauseOnRepairFailure ? "on" : "off"} | autopilot=${updated.autopilotEnabled ? "on" : "off"}`,
+          detail: `autonomy=${updated.policy?.autonomyLevel ?? "-"} | retry=${updated.policy?.retryBudget ?? "-"} | attention=${updated.policy?.operatorAttentionBudget ?? "-"} | escalation=${updated.policy?.escalationPolicy ?? "-"} | autoVerify=${updated.policy?.autoVerify ? "on" : "off"} | autoLand=${updated.policy?.autoLand ? "on" : "off"} | pauseOnRepairFailure=${updated.policy?.pauseOnRepairFailure ? "on" : "off"} | autopilot=${updated.autopilotEnabled ? "on" : "off"}`,
           metadata: {
             missionId: updated.id,
             policy: updated.policy ?? null,
@@ -1760,7 +2675,7 @@ async function commandMission(cwd: string, args: string[]): Promise<void> {
         addMissionCheckpoint(session, updated.id, {
           kind: "task_progress",
           title: "Mission policy updated",
-          detail: `autonomy=${updated.policy?.autonomyLevel ?? "-"} | retry=${updated.policy?.retryBudget ?? "-"} | autoVerify=${updated.policy?.autoVerify ? "on" : "off"} | autoLand=${updated.policy?.autoLand ? "on" : "off"} | pauseOnRepairFailure=${updated.policy?.pauseOnRepairFailure ? "on" : "off"} | autopilot=${updated.autopilotEnabled ? "on" : "off"}`,
+          detail: `autonomy=${updated.policy?.autonomyLevel ?? "-"} | retry=${updated.policy?.retryBudget ?? "-"} | attention=${updated.policy?.operatorAttentionBudget ?? "-"} | escalation=${updated.policy?.escalationPolicy ?? "-"} | autoVerify=${updated.policy?.autoVerify ? "on" : "off"} | autoLand=${updated.policy?.autoLand ? "on" : "off"} | pauseOnRepairFailure=${updated.policy?.pauseOnRepairFailure ? "on" : "off"} | autopilot=${updated.autopilotEnabled ? "on" : "off"}`,
           taskId: updated.rootTaskId ?? updated.planningTaskId ?? null
         });
         await saveSessionRecord(paths, session);
@@ -1792,6 +2707,8 @@ async function commandMission(cwd: string, args: string[]): Promise<void> {
     console.log(`  autonomy: ${refreshedMission.policy?.autonomyLevel ?? "-"}`);
     console.log(`  approvals: ${refreshedMission.policy?.approvalMode ?? "-"}`);
     console.log(`  retry budget: ${refreshedMission.policy?.retryBudget ?? "-"}`);
+    console.log(`  attention budget: ${refreshedMission.policy?.operatorAttentionBudget ?? "-"}`);
+    console.log(`  escalation policy: ${refreshedMission.policy?.escalationPolicy ?? "-"}`);
     console.log(`  auto verify: ${refreshedMission.policy?.autoVerify ? "on" : "off"}`);
     console.log(`  auto land: ${refreshedMission.policy?.autoLand ? "on" : "off"}`);
     console.log(`  pause on repair failure: ${refreshedMission.policy?.pauseOnRepairFailure ? "on" : "off"}`);
@@ -1946,6 +2863,7 @@ async function commandMission(cwd: string, args: string[]): Promise<void> {
   console.log(`Title: ${mission.title}`);
   console.log(`Mode: ${mission.mode}`);
   console.log(`Status: ${mission.status}`);
+  console.log(`Phase: ${mission.phase ?? "-"}`);
   console.log(`Shadow of: ${mission.shadowOfMissionId ?? "-"}`);
   console.log(`Selected: ${session.selectedMissionId === mission.id ? "yes" : "no"}`);
   console.log(`Summary: ${mission.summary}`);
@@ -1959,9 +2877,16 @@ async function commandMission(cwd: string, args: string[]): Promise<void> {
   }
   if (mission.policy) {
     console.log(
-      `Policy: autonomy=${mission.policy.autonomyLevel} | approvals=${mission.policy.approvalMode} | retry=${mission.policy.retryBudget} | verify=${mission.policy.verificationMode} | land=${mission.policy.landPolicy}`
+      `Policy: autonomy=${mission.policy.autonomyLevel} | approvals=${mission.policy.approvalMode} | retry=${mission.policy.retryBudget} | attention=${mission.policy.operatorAttentionBudget} | escalation=${mission.policy.escalationPolicy} | verify=${mission.policy.verificationMode} | land=${mission.policy.landPolicy}`
     );
   }
+  if (mission.simulation) {
+    console.log(
+      `Simulation: attention=${mission.simulation.attentionCost}/${mission.simulation.attentionBudget} | parallelism=${mission.simulation.estimatedParallelism} | escalation=${mission.simulation.escalationPressure} | verification=${mission.simulation.verificationCoverage} | contracts=${mission.simulation.contractCoverage}`
+    );
+  }
+  console.log(`Spec revisions: ${(mission.specRevisions ?? []).length}`);
+  console.log(`Receipts: ${(mission.receiptIds ?? []).length} | Contracts: ${(mission.contractIds ?? []).length}`);
   console.log(`Acceptance: ${mission.acceptance.status}`);
   if (mission.spec) {
     console.log(`Audience: ${mission.spec.audience ?? "-"}`);
@@ -2101,12 +3026,264 @@ async function commandMissions(cwd: string, args: string[]): Promise<void> {
   }
 }
 
-async function commandAccept(cwd: string, args: string[]): Promise<void> {
+async function commandContracts(cwd: string, args: string[]): Promise<void> {
   const { paths } = await requireSession(cwd);
   const session = await loadSessionRecord(paths);
   syncMissionStates(session);
   const missionId = resolveRequestedMissionId(
-    args,
+    [args.find((arg) => !arg.startsWith("--")) ?? "latest"],
+    session.missions
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+      .map((mission) => mission.id)
+  );
+  const includeAll = hasFlag(args, "--all");
+  const contracts = (session.contracts ?? [])
+    .filter((contract) => contract.missionId === missionId)
+    .filter((contract) => includeAll || contract.status === "open")
+    .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+
+  if (args.includes("--json")) {
+    console.log(JSON.stringify(contracts, null, 2));
+    return;
+  }
+
+  if (contracts.length === 0) {
+    console.log("No matching agent contracts found.");
+    return;
+  }
+
+  for (const contract of contracts) {
+    console.log(`${contract.id} | ${contract.status} | ${contract.kind}`);
+    console.log(
+      `  ${contract.sourceAgent} -> ${contract.targetAgent} | impact=${contract.dependencyImpact} | urgency=${contract.urgency}`
+    );
+    console.log(`  title: ${contract.title}`);
+    console.log(`  detail: ${contract.detail}`);
+    console.log(`  required artifacts: ${contract.requiredArtifacts.join(", ") || "-"}`);
+    console.log(`  acceptance: ${contract.acceptanceExpectations.join(" | ") || "-"}`);
+    console.log(`  claimed paths: ${contract.claimedPaths.join(", ") || "-"}`);
+    console.log(`  resolved by: ${contract.resolvedByTaskId ?? "-"}`);
+  }
+}
+
+async function commandContractApply(cwd: string, args: string[]): Promise<void> {
+  const { paths } = await requireSession(cwd);
+  const rpcSnapshot = await tryRpcSnapshot(paths);
+  const session = rpcSnapshot?.session ?? (await loadSessionRecord(paths));
+  await ensureMutableActionAllowed(paths, session, "Applying an agent contract");
+  const contractId = args.find((arg) => !arg.startsWith("--"));
+  if (!contractId) {
+    throw new Error("A contract id is required. Example: kavi contract-apply contract-123");
+  }
+  const contract = (session.contracts ?? []).find((item) => item.id === contractId) ?? null;
+  if (!contract) {
+    throw new Error(`Contract ${contractId} was not found.`);
+  }
+  if (contract.status !== "open") {
+    throw new Error(`Contract ${contract.id} is ${contract.status} and cannot be applied.`);
+  }
+  if (contract.targetAgent !== "codex" && contract.targetAgent !== "claude") {
+    throw new Error(`Contract ${contract.id} targets ${contract.targetAgent} and cannot be auto-applied as an agent task.`);
+  }
+
+  const prompt = buildAgentContractTaskPrompt(contract);
+  const routeMetadata = {
+    source: "agent-contract",
+    contractId: contract.id,
+    sourceTaskId: contract.sourceTaskId,
+    sourceMessageId: contract.sourceMessageId,
+    missionId: contract.missionId
+  };
+  if (rpcSnapshot) {
+    await rpcEnqueueTask(paths, {
+      owner: contract.targetAgent,
+      prompt,
+      planningMode: "direct",
+      routeReason: `Applying open ${contract.kind} contract ${contract.id}.`,
+      routeMetadata,
+      claimedPaths: contract.claimedPaths,
+      routeStrategy: "manual",
+      routeConfidence: 1
+    });
+  } else {
+    await appendCommand(paths, "enqueue", {
+      owner: contract.targetAgent,
+      prompt,
+      planningMode: "direct",
+      routeReason: `Applying open ${contract.kind} contract ${contract.id}.`,
+      routeMetadata,
+      claimedPaths: contract.claimedPaths,
+      routeStrategy: "manual",
+      routeConfidence: 1
+    });
+  }
+  await recordEvent(paths, session.id, "contract.applied", {
+    contractId: contract.id,
+    missionId: contract.missionId,
+    targetAgent: contract.targetAgent
+  });
+
+  if (args.includes("--json")) {
+    console.log(JSON.stringify({
+      contractId: contract.id,
+      owner: contract.targetAgent,
+      prompt,
+      routeMetadata
+    }, null, 2));
+    return;
+  }
+  console.log(`Queued ${contract.targetAgent} work for contract ${contract.id}: ${contract.title}`);
+}
+
+async function commandUpdateContractStatus(
+  cwd: string,
+  args: string[],
+  status: "resolved" | "dismissed"
+): Promise<void> {
+  const { paths } = await requireSession(cwd);
+  const rpcSnapshot = await tryRpcSnapshot(paths);
+  const session = rpcSnapshot?.session ?? (await loadSessionRecord(paths));
+  await ensureMutableActionAllowed(paths, session, `${status === "resolved" ? "Resolving" : "Dismissing"} an agent contract`);
+  const contractId = args.find((arg) => !arg.startsWith("--"));
+  if (!contractId) {
+    throw new Error(`A contract id is required. Example: kavi contract-${status} contract-123`);
+  }
+  const resolvedByTaskId = getOptionalFilter(args, "--task");
+  const contract = (session.contracts ?? []).find((item) => item.id === contractId) ?? null;
+  if (!contract) {
+    throw new Error(`Contract ${contractId} was not found.`);
+  }
+
+  if (rpcSnapshot) {
+    await rpcSetAgentContractStatus(paths, {
+      contractId: contract.id,
+      status,
+      ...(resolvedByTaskId ? { resolvedByTaskId } : {})
+    });
+  } else {
+    const updated = setAgentContractStatus(session, contract.id, status, {
+      resolvedByTaskId
+    });
+    if (!updated) {
+      throw new Error(`Contract ${contract.id} was not found.`);
+    }
+    addDecisionRecord(session, {
+      kind: "plan",
+      agent: "router",
+      taskId: updated.sourceTaskId,
+      summary: `Updated contract ${updated.id} to ${updated.status}`,
+      detail: `Operator changed the contract lifecycle to ${updated.status}.`,
+      metadata: {
+        missionId: updated.missionId,
+        contractId: updated.id,
+        status: updated.status
+      }
+    });
+    addMissionCheckpoint(session, updated.missionId, {
+      kind: "task_progress",
+      title: `Contract ${updated.status}`,
+      detail: `${updated.title} is now ${updated.status}.`,
+      taskId: updated.sourceTaskId
+    });
+    await saveSessionRecord(paths, session);
+    await recordEvent(paths, session.id, "contract.status_changed", {
+      contractId: updated.id,
+      missionId: updated.missionId,
+      status: updated.status
+    });
+    await rpcNotifyExternalUpdate(paths, "contract.status_changed").catch(() => {});
+  }
+
+  if (args.includes("--json")) {
+    console.log(JSON.stringify({
+      contractId: contract.id,
+      status,
+      resolvedByTaskId: resolvedByTaskId ?? null
+    }, null, 2));
+    return;
+  }
+  console.log(`${status === "resolved" ? "Resolved" : "Dismissed"} contract ${contract.id}: ${contract.title}`);
+}
+
+async function commandReceipts(cwd: string, args: string[]): Promise<void> {
+  const { paths } = await requireSession(cwd);
+  const session = await loadSessionRecord(paths);
+  syncMissionStates(session);
+  const missionId = resolveRequestedMissionId(
+    [args.find((arg) => !arg.startsWith("--")) ?? "latest"],
+    session.missions
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+      .map((mission) => mission.id)
+  );
+  const receipts = (session.receipts ?? [])
+    .filter((receipt) => receipt.missionId === missionId)
+    .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+  const timelineMode = hasFlag(args, "--timeline");
+
+  if (timelineMode) {
+    const timeline = [...receipts]
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+      .map((receipt) => ({
+        timestamp: receipt.createdAt,
+        receiptId: receipt.id,
+        taskId: receipt.taskId,
+        owner: receipt.owner,
+        outcome: receipt.outcome,
+        title: receipt.title,
+        summary: receipt.summary,
+        changedPaths: receipt.changedPaths,
+        commands: receipt.commands,
+        verificationEvidence: receipt.verificationEvidence,
+        assumptions: receipt.assumptions,
+        followUps: receipt.followUps,
+        risks: receipt.risks
+      }));
+    if (args.includes("--json")) {
+      console.log(JSON.stringify(timeline, null, 2));
+      return;
+    }
+    if (timeline.length === 0) {
+      console.log("No mission receipts found.");
+      return;
+    }
+    for (const item of timeline) {
+      console.log(`${item.timestamp} | ${item.owner} | ${item.outcome} | ${item.title}`);
+      console.log(`  changed: ${item.changedPaths.join(", ") || "-"}`);
+      console.log(`  verification: ${item.verificationEvidence.join(" | ") || "-"}`);
+      console.log(`  follow-ups: ${item.followUps.join(" | ") || "-"}`);
+    }
+    return;
+  }
+
+  if (args.includes("--json")) {
+    console.log(JSON.stringify(receipts, null, 2));
+    return;
+  }
+
+  if (receipts.length === 0) {
+    console.log("No mission receipts found.");
+    return;
+  }
+
+  for (const receipt of receipts) {
+    console.log(`${receipt.id} | ${receipt.outcome} | ${receipt.owner} | ${receipt.title}`);
+    console.log(`  summary: ${receipt.summary}`);
+    console.log(`  changed: ${receipt.changedPaths.join(", ") || "-"}`);
+    console.log(`  commands: ${receipt.commands.join(" | ") || "-"}`);
+    console.log(`  verification: ${receipt.verificationEvidence.join(" | ") || "-"}`);
+    console.log(`  assumptions: ${receipt.assumptions.join(" | ") || "-"}`);
+    console.log(`  follow-ups: ${receipt.followUps.join(" | ") || "-"}`);
+    console.log(`  risks: ${receipt.risks.join(" | ") || "-"}`);
+  }
+}
+
+async function commandPostmortem(cwd: string, args: string[]): Promise<void> {
+  const { paths } = await requireSession(cwd);
+  const session = await loadSessionRecord(paths);
+  syncMissionStates(session);
+  const artifacts = await listTaskArtifacts(paths);
+  const missionId = resolveRequestedMissionId(
+    [args.find((arg) => !arg.startsWith("--")) ?? "latest"],
     session.missions
       .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
       .map((mission) => mission.id)
@@ -2116,7 +3293,149 @@ async function commandAccept(cwd: string, args: string[]): Promise<void> {
     throw new Error(`Mission ${missionId} was not found.`);
   }
 
+  const postmortem = buildMissionPostmortem(session, mission, artifacts);
   if (args.includes("--json")) {
+    console.log(JSON.stringify(postmortem, null, 2));
+    return;
+  }
+
+  console.log(`Mission postmortem: ${mission.id}`);
+  console.log(`Outcome: ${postmortem.outcome}`);
+  console.log(`Summary: ${postmortem.summary}`);
+  console.log("Wins:");
+  for (const item of postmortem.wins) {
+    console.log(`- ${item}`);
+  }
+  if (postmortem.wins.length === 0) {
+    console.log("- none");
+  }
+  console.log("Pains:");
+  for (const item of postmortem.pains) {
+    console.log(`- ${item}`);
+  }
+  if (postmortem.pains.length === 0) {
+    console.log("- none");
+  }
+  console.log("Follow-up debt:");
+  for (const item of postmortem.followUpDebt) {
+    console.log(`- ${item}`);
+  }
+  if (postmortem.followUpDebt.length === 0) {
+    console.log("- none");
+  }
+  console.log("Reinforced patterns:");
+  for (const item of postmortem.reinforcedPatterns) {
+    console.log(`- ${item}`);
+  }
+  if (postmortem.reinforcedPatterns.length === 0) {
+    console.log("- none");
+  }
+  console.log("Anti-patterns:");
+  for (const item of postmortem.antiPatterns) {
+    console.log(`- ${item}`);
+  }
+  if (postmortem.antiPatterns.length === 0) {
+    console.log("- none");
+  }
+}
+
+async function commandJudgeFamily(cwd: string, args: string[], mode: "judge" | "audit" | "objections"): Promise<void> {
+  const { paths } = await requireSession(cwd);
+  const session = await loadSessionRecord(paths);
+  syncMissionStates(session);
+  const artifacts = await listTaskArtifacts(paths);
+  const missionId = resolveRequestedMissionId(
+    [args.find((arg) => !arg.startsWith("--")) ?? "latest"],
+    session.missions
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+      .map((mission) => mission.id)
+  );
+  const mission = session.missions.find((item) => item.id === missionId) ?? null;
+  if (!mission) {
+    throw new Error(`Mission ${missionId} was not found.`);
+  }
+
+  const audit = buildMissionAuditReport(session, mission, artifacts);
+  if (!audit) {
+    throw new Error(`Mission ${mission.id} could not be audited.`);
+  }
+  if (mode === "objections") {
+    const objections = buildMissionObjections(session, mission, artifacts);
+    if (args.includes("--json")) {
+      console.log(JSON.stringify(objections, null, 2));
+      return;
+    }
+    console.log(`Mission objections: ${mission.id}`);
+    for (const objection of objections) {
+      console.log(`- [${objection.severity}] ${objection.title}`);
+      console.log(`  ${objection.detail}`);
+      if (objection.suggestedAction) {
+        console.log(`  action: ${objection.suggestedAction}`);
+      }
+    }
+    if (objections.length === 0) {
+      console.log("- none");
+    }
+    return;
+  }
+
+  if (args.includes("--json")) {
+    console.log(JSON.stringify(audit, null, 2));
+    if (mode === "judge") {
+      process.exitCode = audit.verdict === "blocked" ? 1 : 0;
+    }
+    return;
+  }
+
+  console.log(`Mission ${mode}: ${mission.id}`);
+  console.log(`Verdict: ${audit.verdict} | score=${audit.score}`);
+  console.log(`Summary: ${audit.summary}`);
+  console.log("Approvals:");
+  for (const item of audit.approvals) {
+    console.log(`- ${item}`);
+  }
+  if (audit.approvals.length === 0) {
+    console.log("- none");
+  }
+  console.log("Objections:");
+  for (const objection of audit.objections) {
+    console.log(`- [${objection.severity}] ${objection.title}`);
+    console.log(`  ${objection.detail}`);
+    if (objection.evidence.length > 0) {
+      console.log(`  evidence: ${objection.evidence.join(" | ")}`);
+    }
+    if (objection.suggestedAction) {
+      console.log(`  action: ${objection.suggestedAction}`);
+    }
+  }
+  if (audit.objections.length === 0) {
+    console.log("- none");
+  }
+  if (mode === "judge") {
+    process.exitCode = audit.verdict === "blocked" ? 1 : 0;
+  }
+}
+
+async function commandAccept(cwd: string, args: string[]): Promise<void> {
+  const normalizedArgs = [...args];
+  if (normalizedArgs[0] === "suite") {
+    normalizedArgs.shift();
+  }
+  const { paths } = await requireSession(cwd);
+  const session = await loadSessionRecord(paths);
+  syncMissionStates(session);
+  const missionId = resolveRequestedMissionId(
+    normalizedArgs,
+    session.missions
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+      .map((mission) => mission.id)
+  );
+  const mission = session.missions.find((item) => item.id === missionId) ?? null;
+  if (!mission) {
+    throw new Error(`Mission ${missionId} was not found.`);
+  }
+
+  if (normalizedArgs.includes("--json")) {
     console.log(
       JSON.stringify(
         {
@@ -2168,6 +3487,24 @@ async function commandAccept(cwd: string, args: string[]): Promise<void> {
     }
     console.log(`  detail: ${check.detail}`);
   }
+  if ((mission.acceptance.failurePacks ?? []).length > 0) {
+    console.log("Failure packs:");
+    for (const pack of mission.acceptance.failurePacks) {
+      console.log(`- ${pack.id} | ${pack.kind} | ${pack.title}`);
+      console.log(`  summary: ${pack.summary}`);
+      console.log(`  evidence: ${pack.evidence.join(", ") || "-"}`);
+      console.log(`  repair focus: ${pack.repairFocus.join(" | ") || "-"}`);
+    }
+  }
+  if ((mission.acceptance.repairPlans ?? []).length > 0) {
+    console.log("Repair plans:");
+    for (const plan of mission.acceptance.repairPlans) {
+      console.log(`- ${plan.id} | ${plan.status} | ${plan.owner} | ${plan.title}`);
+      console.log(`  summary: ${plan.summary}`);
+      console.log(`  reason: ${plan.routeReason}`);
+      console.log(`  queued task: ${plan.queuedTaskId ?? "-"}`);
+    }
+  }
 }
 
 async function commandVerify(cwd: string, args: string[]): Promise<void> {
@@ -2190,14 +3527,16 @@ async function commandVerify(cwd: string, args: string[]): Promise<void> {
   const queuedRepairTasks = refreshedSession.tasks
     .filter((task) => task.missionId === mission.id && task.routeMetadata?.source === "acceptance-repair")
     .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+  const explanations = explainMissionAcceptanceFailures(mission);
 
   if (args.includes("--json")) {
-    const explanations = explainMissionAcceptanceFailures(mission);
     console.log(
       JSON.stringify(
         {
           acceptance: mission.acceptance,
           acceptanceExplanations: explanations,
+          failurePacks: mission.acceptance.failurePacks ?? [],
+          repairPlans: mission.acceptance.repairPlans ?? [],
           queuedRepairTask: queuedRepairTasks[0]
             ? {
                 id: queuedRepairTasks[0].id,
@@ -2221,6 +3560,34 @@ async function commandVerify(cwd: string, args: string[]): Promise<void> {
         2
       )
     );
+    return;
+  }
+
+  if (args.includes("--explain")) {
+    console.log(`Mission: ${mission.title}`);
+    console.log(`Acceptance: ${mission.acceptance.status}`);
+    if (explanations.length === 0) {
+      console.log("No failed acceptance checks remain.");
+    } else {
+      console.log("Failure explanations:");
+      for (const explanation of explanations) {
+        console.log(`- ${explanation.title}`);
+        console.log(`  summary: ${explanation.summary}`);
+        console.log(`  expected: ${explanation.expected.join(" | ") || "-"}`);
+        console.log(`  observed: ${explanation.observed.join(" | ") || "-"}`);
+        console.log(`  evidence: ${explanation.evidence.join(", ") || "-"}`);
+        console.log(`  repair focus: ${explanation.repairFocus.join(" | ") || "-"}`);
+      }
+    }
+    if ((mission.acceptance.repairPlans ?? []).length > 0) {
+      console.log("Repair plans:");
+      for (const plan of mission.acceptance.repairPlans) {
+        console.log(`- ${plan.id} | ${plan.status} | ${plan.owner}`);
+        console.log(`  summary: ${plan.summary}`);
+        console.log(`  reason: ${plan.routeReason}`);
+        console.log(`  queued task: ${plan.queuedTaskId ?? "-"}`);
+      }
+    }
     return;
   }
 
@@ -2249,6 +3616,24 @@ async function commandVerify(cwd: string, args: string[]): Promise<void> {
     }
     console.log(`  detail: ${check.detail}`);
   }
+  if ((mission.acceptance.failurePacks ?? []).length > 0) {
+    console.log("Failure packs:");
+    for (const pack of mission.acceptance.failurePacks) {
+      console.log(`- ${pack.id} | ${pack.kind} | ${pack.title}`);
+      console.log(`  summary: ${pack.summary}`);
+      console.log(`  evidence: ${pack.evidence.join(", ") || "-"}`);
+      console.log(`  repair focus: ${pack.repairFocus.join(" | ") || "-"}`);
+    }
+  }
+  if ((mission.acceptance.repairPlans ?? []).length > 0) {
+    console.log("Repair plans:");
+    for (const plan of mission.acceptance.repairPlans) {
+      console.log(`- ${plan.id} | ${plan.status} | ${plan.owner} | ${plan.title}`);
+      console.log(`  summary: ${plan.summary}`);
+      console.log(`  reason: ${plan.routeReason}`);
+      console.log(`  queued task: ${plan.queuedTaskId ?? "-"}`);
+    }
+  }
   if (queuedRepairTasks.length > 0 && mission.acceptance.status === "failed") {
     for (const queuedRepairTask of queuedRepairTasks) {
       console.log(`Repair queued: ${queuedRepairTask.id} -> ${queuedRepairTask.owner}`);
@@ -2260,18 +3645,237 @@ async function commandVerify(cwd: string, args: string[]): Promise<void> {
   }
 }
 
+async function commandRepairPlan(cwd: string, args: string[]): Promise<void> {
+  const { paths } = await requireSession(cwd);
+  const session = await loadSessionRecord(paths);
+  syncMissionStates(session);
+  const missionId = resolveRequestedMissionId(
+    args,
+    session.missions
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+      .map((mission) => mission.id)
+  );
+  const mission = session.missions.find((item) => item.id === missionId) ?? null;
+  if (!mission) {
+    throw new Error(`Mission ${missionId} was not found.`);
+  }
+  const plans = mission.acceptance.repairPlans ?? [];
+  if (args.includes("--json")) {
+    console.log(JSON.stringify(plans, null, 2));
+    return;
+  }
+  if (plans.length === 0) {
+    console.log("No acceptance repair plans are recorded for this mission.");
+    return;
+  }
+  for (const plan of plans) {
+    console.log(`${plan.id} | ${plan.status} | ${plan.owner} | ${plan.title}`);
+    console.log(`  summary: ${plan.summary}`);
+    console.log(`  reason: ${plan.routeReason}`);
+    console.log(`  confidence: ${plan.routeConfidence.toFixed(2)}`);
+    console.log(`  claimed paths: ${plan.claimedPaths.join(", ") || "-"}`);
+    console.log(`  failed checks: ${plan.failedCheckIds.join(", ") || "-"}`);
+    console.log(`  failure packs: ${plan.failurePackIds.join(", ") || "-"}`);
+    console.log(`  repair focus: ${plan.repairFocus.join(" | ") || "-"}`);
+    console.log(`  queued task: ${plan.queuedTaskId ?? "-"}`);
+  }
+}
+
+async function commandFailurePack(cwd: string, args: string[]): Promise<void> {
+  const { paths } = await requireSession(cwd);
+  const session = await loadSessionRecord(paths);
+  syncMissionStates(session);
+  const missionId = resolveRequestedMissionId(
+    args,
+    session.missions
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+      .map((mission) => mission.id)
+  );
+  const mission = session.missions.find((item) => item.id === missionId) ?? null;
+  if (!mission) {
+    throw new Error(`Mission ${missionId} was not found.`);
+  }
+  const checkId = getOptionalFilter(args, "--check");
+  const packs = (mission.acceptance.failurePacks ?? []).filter((pack) =>
+    !checkId || pack.checkId === checkId
+  );
+  if (args.includes("--json")) {
+    console.log(JSON.stringify(packs, null, 2));
+    return;
+  }
+  if (packs.length === 0) {
+    console.log("No acceptance failure packs are recorded for this mission.");
+    return;
+  }
+  for (const pack of packs) {
+    console.log(`${pack.id} | ${pack.kind} | ${pack.title}`);
+    console.log(`  summary: ${pack.summary}`);
+    console.log(`  expected: ${pack.expected.join(" | ") || "-"}`);
+    console.log(`  observed: ${pack.observed.join(" | ") || "-"}`);
+    console.log(`  evidence: ${pack.evidence.join(", ") || "-"}`);
+    console.log(`  repair focus: ${pack.repairFocus.join(" | ") || "-"}`);
+    console.log(`  request: ${pack.request.method ?? "-"} ${pack.request.urlPath ?? "-"} | selector=${pack.request.selector ?? "-"}`);
+    console.log(`  server: ${pack.serverCommand ?? "-"} | harness: ${pack.harnessPath ?? "-"}`);
+    console.log(`  output: ${normalizeLine(pack.runtimeCapture.lastOutput).slice(0, 320) || "-"}`);
+  }
+}
+
 async function commandBrain(cwd: string, args: string[]): Promise<void> {
   const { paths } = await requireSession(cwd);
   const session = await loadSessionRecord(paths);
+  const subcommand = args[0] && !args[0].startsWith("--") ? args[0] : null;
+  const missionArg = getOptionalFilter(args, "--mission");
+  const resolvedMissionId =
+    missionArg === "latest"
+      ? latestMission(session)?.id ?? null
+      : missionArg;
+
+  if (subcommand === "pack") {
+    const task = resolvedMissionId
+      ? [...session.tasks]
+          .filter((candidate) => candidate.missionId === resolvedMissionId)
+          .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0] ?? null
+      : null;
+    const phaseValue = getOptionalFilter(args, "--phase");
+    const phase =
+      phaseValue === "planning" ||
+      phaseValue === "implementation" ||
+      phaseValue === "repair" ||
+      phaseValue === "verification"
+        ? phaseValue
+        : undefined;
+    const pack = buildBrainPack(session, {
+      missionId: resolvedMissionId,
+      task,
+      phase,
+      path: getOptionalFilter(args, "--path"),
+      includeRetired: args.includes("--retired"),
+      limit: args.includes("--all") ? 8 : 4
+    });
+
+    if (args.includes("--json")) {
+      console.log(JSON.stringify(pack, null, 2));
+      return;
+    }
+
+    console.log(`Brain pack | phase=${pack.phase} | mission=${pack.missionId ?? "-"} | path=${pack.pathHint ?? "-"}`);
+    console.log(pack.summary);
+    for (const section of pack.sections) {
+      console.log("");
+      console.log(`${section.title}`);
+      console.log(`  ${section.rationale}`);
+      for (const entry of section.entries) {
+        console.log(
+          `  - ${entry.id} | ${entry.category ?? "artifact"} | ${entry.title}`
+        );
+      }
+    }
+    if (pack.sections.length === 0) {
+      console.log("No Brain pack sections are available yet.");
+    }
+    return;
+  }
+
+  if (subcommand === "review") {
+    const payload = buildBrainReviewQueue(session, {
+      missionId: resolvedMissionId,
+      includeRetired: args.includes("--all"),
+      limit: args.includes("--all") ? session.brain.length : 20
+    });
+    if (args.includes("--json")) {
+      console.log(JSON.stringify(payload, null, 2));
+      return;
+    }
+    if (payload.length === 0) {
+      console.log("No Brain entries currently need review.");
+      return;
+    }
+    for (const item of payload) {
+      console.log(`${item.entryId} | ${item.severity} | ${item.category ?? "artifact"} | ${item.title}`);
+      console.log(`  scope: ${item.scope ?? "-"} | action: ${item.recommendedAction}`);
+      console.log(`  reasons: ${item.reasons.join(" | ")}`);
+    }
+    return;
+  }
+
+  if (subcommand === "distill") {
+    const payload = buildBrainDistillationPlan(session, {
+      missionId: resolvedMissionId,
+      category: parseBrainCategory(getOptionalFilter(args, "--category")),
+      scope: parseBrainScope(getOptionalFilter(args, "--scope")),
+      query: getOptionalFilter(args, "--query") ?? ""
+    });
+    if (!payload) {
+      if (args.includes("--json")) {
+        console.log("null");
+      } else {
+        console.log("No Brain distillation candidate is available for the requested filters.");
+      }
+      return;
+    }
+
+    if (args.includes("--apply")) {
+      if (isSessionLive(session) && (await pingRpc(paths))) {
+        await ensureMutableActionAllowed(paths, session, "Distilling Brain entries");
+      }
+      const refreshed = await loadSessionRecord(paths);
+      const latestPayload = buildBrainDistillationPlan(refreshed, {
+        missionId: resolvedMissionId,
+        category: parseBrainCategory(getOptionalFilter(args, "--category")),
+        scope: parseBrainScope(getOptionalFilter(args, "--scope")),
+        query: getOptionalFilter(args, "--query") ?? ""
+      });
+      if (!latestPayload) {
+        throw new Error("No Brain distillation candidate is available anymore.");
+      }
+      const distilled = applyBrainDistillationPlan(refreshed, latestPayload);
+      await saveSessionRecord(paths, refreshed);
+      await recordEvent(paths, refreshed.id, "brain.entries_distilled", {
+        entryId: distilled.id,
+        missionId: distilled.missionId,
+        sourceEntryIds: latestPayload.sourceEntryIds
+      });
+      await notifyOperatorSurface(paths, "brain.entries_distilled");
+      if (args.includes("--json")) {
+        console.log(JSON.stringify({
+          applied: true,
+          entry: distilled,
+          sourceEntryIds: latestPayload.sourceEntryIds
+        }, null, 2));
+      } else {
+        console.log(`Distilled ${latestPayload.sourceEntryIds.length} Brain entries into ${distilled.id}`);
+      }
+      return;
+    }
+
+    if (args.includes("--json")) {
+      console.log(JSON.stringify(payload, null, 2));
+      return;
+    }
+
+    console.log(`${payload.title}`);
+    console.log(`  category: ${payload.category} | scope: ${payload.scope} | mission: ${payload.missionId ?? "-"}`);
+    console.log(`  sources: ${payload.sourceEntryIds.join(", ")}`);
+    console.log(`  tags: ${payload.tags.join(", ") || "-"}`);
+    console.log(`  evidence: ${payload.evidence.join(", ") || "-"}`);
+    console.log(`  commands: ${payload.commands.join(" | ") || "-"}`);
+    console.log("");
+    console.log(payload.content);
+    console.log("");
+    console.log("Run with --apply to persist this distilled Brain entry.");
+    return;
+  }
+
   const graphEntryId = getOptionalFilter(args, "--entry");
   if (args.includes("--graph")) {
-    const graph = buildBrainGraph(session, {
+    const mode = parseBrainGraphMode(getOptionalFilter(args, "--mode"));
+    const graph = filterBrainGraphMode(buildBrainGraph(session, {
       entryId: graphEntryId,
-      missionId: getOptionalFilter(args, "--mission"),
+      missionId: resolvedMissionId,
       path: getOptionalFilter(args, "--path"),
       includeRetired: args.includes("--retired"),
       limit: args.includes("--all") ? session.brain.length : 16
-    });
+    }), mode);
 
     if (args.includes("--json")) {
       console.log(JSON.stringify(graph, null, 2));
@@ -2284,6 +3888,7 @@ async function commandBrain(cwd: string, args: string[]): Promise<void> {
     }
 
     console.log(`Brain graph focus: ${graph.focusEntryId ?? "-"}`);
+    console.log(`Mode: ${mode}`);
     console.log(`Nodes: ${graph.nodes.length} | Edges: ${graph.edges.length}`);
     const edgeKinds = [...new Set(graph.edges.map((edge) => edge.kind))];
     console.log(`Edge kinds: ${edgeKinds.join(", ") || "-"}`);
@@ -2320,22 +3925,9 @@ async function commandBrain(cwd: string, args: string[]): Promise<void> {
   const payload = queryBrainEntries(session, {
     query: query ?? "",
     path: getOptionalFilter(args, "--path"),
-    category:
-      getOptionalFilter(args, "--category") === "fact" ||
-      getOptionalFilter(args, "--category") === "decision" ||
-      getOptionalFilter(args, "--category") === "procedure" ||
-      getOptionalFilter(args, "--category") === "risk" ||
-      getOptionalFilter(args, "--category") === "artifact"
-        ? (getOptionalFilter(args, "--category") as "fact" | "decision" | "procedure" | "risk" | "artifact")
-        : "all",
-    scope:
-      getOptionalFilter(args, "--scope") === "repo" ||
-      getOptionalFilter(args, "--scope") === "mission" ||
-      getOptionalFilter(args, "--scope") === "personal" ||
-      getOptionalFilter(args, "--scope") === "pattern"
-        ? (getOptionalFilter(args, "--scope") as "repo" | "mission" | "personal" | "pattern")
-        : "all",
-    missionId: getOptionalFilter(args, "--mission"),
+    category: parseBrainCategory(getOptionalFilter(args, "--category")),
+    scope: parseBrainScope(getOptionalFilter(args, "--scope")),
+    missionId: resolvedMissionId,
     includeRetired: args.includes("--retired"),
     limit: args.includes("--all") ? session.brain.length : 20
   });
@@ -2596,6 +4188,115 @@ async function commandPatterns(cwd: string, args: string[]): Promise<void> {
     return;
   }
 
+  if (subcommand === "benchmark") {
+    const payload = await buildPatternBenchmarks(paths);
+    if (args.includes("--json")) {
+      console.log(JSON.stringify(payload, null, 2));
+      return;
+    }
+    if (payload.length === 0) {
+      console.log("No pattern benchmarks are available yet.");
+      return;
+    }
+    for (const benchmark of payload.slice(0, hasFlag(args, "--all") ? Number.MAX_SAFE_INTEGER : 12)) {
+      console.log(`${benchmark.templateId} | score=${benchmark.score} | ${benchmark.label}`);
+      console.log(
+        `  success=${benchmark.successCount} delivery=${benchmark.deliveryCount} anti=${benchmark.antiPatternCount} repos=${benchmark.repoCount} confidence=${(benchmark.averageConfidence * 100).toFixed(0)}%`
+      );
+      console.log(`  commands: ${benchmark.commands.join(" | ") || "-"}`);
+      console.log(`  acceptance: ${benchmark.acceptanceCriteria.join(" | ") || "-"}`);
+      console.log(`  anti-patterns: ${benchmark.antiPatternSignals.join(" | ") || "-"}`);
+    }
+    return;
+  }
+
+  if (subcommand === "studio") {
+    const prompt = getOptionalFilter(args, "--prompt");
+    if (!prompt?.trim()) {
+      throw new Error("patterns studio requires --prompt.");
+    }
+    const templateIds: string[] = [];
+    for (let index = 0; index < args.length; index += 1) {
+      if (args[index] === "--template" && args[index + 1]) {
+        templateIds.push(args[index + 1]!);
+      }
+    }
+    const payload = await buildPatternStudio(paths, prompt, templateIds);
+    if (args.includes("--json")) {
+      console.log(JSON.stringify(payload, null, 2));
+      return;
+    }
+    console.log(`Pattern Studio: ${payload.composition.labels.join(" + ") || "no selected templates"}`);
+    console.log(`Benchmark score: ${payload.composition.benchmarkScore}`);
+    console.log(`Stacks: ${payload.composition.stacks.join(", ") || "-"}`);
+    console.log(`Node kinds: ${payload.composition.nodeKinds.join(", ") || "-"}`);
+    console.log(`Conflicts: ${payload.composition.conflicts.join(" | ") || "-"}`);
+    console.log(`Anti-pattern signals: ${payload.composition.antiPatternSignals.join(" | ") || "-"}`);
+    if (payload.rankedTemplates.length > 0) {
+      console.log("Ranked templates:");
+      for (const item of payload.rankedTemplates.slice(0, 6)) {
+        console.log(`- ${item.template.id} | score=${item.score} | ${item.template.label}`);
+        console.log(`  reasons: ${item.reasons.join(", ") || "-"}`);
+      }
+    }
+    if (payload.selectedBenchmarks.length > 0) {
+      console.log("Selected template benchmarks:");
+      for (const benchmark of payload.selectedBenchmarks) {
+        console.log(`- ${benchmark.label} | score=${benchmark.score}`);
+        console.log(
+          `  success=${benchmark.successCount} delivery=${benchmark.deliveryCount} anti=${benchmark.antiPatternCount} repos=${benchmark.repoCount}`
+        );
+      }
+    }
+    if (payload.relatedRepoClusters.length > 0) {
+      console.log("Related repo clusters:");
+      for (const cluster of payload.relatedRepoClusters.slice(0, 6)) {
+        console.log(`- ${cluster.labels.join(" + ")} | score=${cluster.score}`);
+        console.log(`  stacks: ${cluster.stacks.join(", ") || "-"}`);
+      }
+    }
+    if (payload.relatedTemplateLinks.length > 0) {
+      console.log("Related template links:");
+      for (const link of payload.relatedTemplateLinks.slice(0, 6)) {
+        console.log(`- ${link.leftLabel} <-> ${link.rightLabel} | score=${link.score}`);
+        console.log(`  acceptance: ${link.sharedAcceptance.join(" | ") || "-"}`);
+      }
+    }
+    console.log(`Top portfolio repos: ${payload.topRepos.map((item) => `${item.value} (${item.count})`).join(", ") || "-"}`);
+    console.log(`Top portfolio stacks: ${payload.topStacks.map((item) => `${item.value} (${item.count})`).join(", ") || "-"}`);
+    console.log(`Composed prompt:\n${payload.composition.composedPrompt}`);
+    return;
+  }
+
+  if (subcommand === "compose") {
+    const prompt = getOptionalFilter(args, "--prompt");
+    if (!prompt?.trim()) {
+      throw new Error("patterns compose requires --prompt.");
+    }
+    const templateIds: string[] = [];
+    for (let index = 0; index < args.length; index += 1) {
+      if (args[index] === "--template" && args[index + 1]) {
+        templateIds.push(args[index + 1]!);
+      }
+    }
+    const payload = await composePatternTemplates(paths, prompt, templateIds);
+    if (args.includes("--json")) {
+      console.log(JSON.stringify(payload, null, 2));
+      return;
+    }
+    console.log(`Pattern composition: ${payload.labels.join(" + ") || "none"}`);
+    console.log(`Benchmark score: ${payload.benchmarkScore}`);
+    console.log(`Stacks: ${payload.stacks.join(", ") || "-"}`);
+    console.log(`Node kinds: ${payload.nodeKinds.join(", ") || "-"}`);
+    console.log(`Commands: ${payload.commands.join(" | ") || "-"}`);
+    console.log(`Acceptance defaults: ${payload.acceptanceCriteria.join(" | ") || "-"}`);
+    console.log(`Anti-pattern signals: ${payload.antiPatternSignals.join(" | ") || "-"}`);
+    console.log(`Conflicts: ${payload.conflicts.join(" | ") || "-"}`);
+    console.log("Composed prompt:");
+    console.log(payload.composedPrompt);
+    return;
+  }
+
   if (subcommand === "templates") {
     const query = getOptionalFilter(args, "--query");
     const payload = query
@@ -2752,6 +4453,45 @@ async function commandPatterns(cwd: string, args: string[]): Promise<void> {
   }
 }
 
+async function commandPortfolio(cwd: string, args: string[]): Promise<void> {
+  const repoRoot = (await findRepoRoot(cwd)) ?? cwd;
+  const paths = resolveAppPaths(repoRoot);
+  const payload = await buildPatternConstellation(paths);
+  const graph = {
+    repos: payload.repoProfiles,
+    links: payload.repoLinks,
+    clusters: payload.repoClusters,
+    templateLinks: payload.templateLinks,
+    benchmarks: await buildPatternBenchmarks(paths)
+  };
+
+  if (args.includes("--json")) {
+    console.log(JSON.stringify(graph, null, 2));
+    return;
+  }
+
+  console.log(`Portfolio repos: ${graph.repos.length}`);
+  console.log(`Repo links: ${graph.links.length}`);
+  console.log(`Repo clusters: ${graph.clusters.length}`);
+  console.log(`Template links: ${graph.templateLinks.length}`);
+  console.log(`Benchmarks: ${graph.benchmarks.length}`);
+  if (graph.clusters.length > 0) {
+    console.log("Clusters:");
+    for (const cluster of graph.clusters.slice(0, 8)) {
+      console.log(`- ${cluster.labels.join(" + ")} | score=${cluster.score}`);
+      console.log(`  stacks: ${cluster.stacks.join(", ") || "-"}`);
+      console.log(`  nodes: ${cluster.nodeKinds.join(", ") || "-"}`);
+    }
+  }
+  if (graph.benchmarks.length > 0) {
+    console.log("Top benchmarks:");
+    for (const benchmark of graph.benchmarks.slice(0, 8)) {
+      console.log(`- ${benchmark.label} | score=${benchmark.score}`);
+      console.log(`  success=${benchmark.successCount} anti=${benchmark.antiPatternCount} repos=${benchmark.repoCount}`);
+    }
+  }
+}
+
 async function commandPlayback(cwd: string, args: string[]): Promise<void> {
   const { paths } = await requireSession(cwd);
   const session = await loadSessionRecord(paths);
@@ -2765,15 +4505,32 @@ async function commandPlayback(cwd: string, args: string[]): Promise<void> {
       .map((mission) => mission.id)
   );
   const frames = buildMissionPlayback(session, artifacts, missionId, latestReport);
+  const phaseValue = getOptionalFilter(args, "--phase");
+  if (
+    phaseValue &&
+    phaseValue !== "all" &&
+    phaseValue !== "spec" &&
+    phaseValue !== "execution" &&
+    phaseValue !== "repair" &&
+    phaseValue !== "contracts" &&
+    phaseValue !== "acceptance" &&
+    phaseValue !== "landing" &&
+    phaseValue !== "audit"
+  ) {
+    throw new Error("--phase must be one of: all, spec, execution, repair, contracts, acceptance, landing, audit.");
+  }
+  const phase = phaseValue ?? "all";
+  const filteredFrames = filterMissionPlayback(frames, phase);
   if (args.includes("--json")) {
-    console.log(JSON.stringify(frames, null, 2));
+    console.log(JSON.stringify(filteredFrames, null, 2));
     return;
   }
-  if (frames.length === 0) {
+  if (filteredFrames.length === 0) {
     console.log("No mission playback is available.");
     return;
   }
-  for (const frame of frames) {
+  console.log(`Playback phase: ${phase}`);
+  for (const frame of filteredFrames) {
     console.log(`${frame.timestamp} | ${frame.kind} | ${frame.title}`);
     console.log(`  ${frame.detail}`);
   }
@@ -4094,8 +5851,38 @@ async function main(): Promise<void> {
     case "mission":
       await commandMission(cwd, args);
       break;
+    case "blueprint":
+      await commandBlueprint(cwd, args);
+      break;
     case "missions":
       await commandMissions(cwd, args);
+      break;
+    case "contracts":
+      await commandContracts(cwd, args);
+      break;
+    case "contract-apply":
+      await commandContractApply(cwd, args);
+      break;
+    case "contract-resolve":
+      await commandUpdateContractStatus(cwd, args, "resolved");
+      break;
+    case "contract-dismiss":
+      await commandUpdateContractStatus(cwd, args, "dismissed");
+      break;
+    case "receipts":
+      await commandReceipts(cwd, args);
+      break;
+    case "judge":
+      await commandJudgeFamily(cwd, args, "judge");
+      break;
+    case "audit":
+      await commandJudgeFamily(cwd, args, "audit");
+      break;
+    case "objections":
+      await commandJudgeFamily(cwd, args, "objections");
+      break;
+    case "postmortem":
+      await commandPostmortem(cwd, args);
       break;
     case "playback":
       await commandPlayback(cwd, args);
@@ -4105,6 +5892,12 @@ async function main(): Promise<void> {
       break;
     case "verify":
       await commandVerify(cwd, args);
+      break;
+    case "repair-plan":
+      await commandRepairPlan(cwd, args);
+      break;
+    case "failure-pack":
+      await commandFailurePack(cwd, args);
       break;
     case "brain":
       await commandBrain(cwd, args);
@@ -4123,6 +5916,9 @@ async function main(): Promise<void> {
       break;
     case "patterns":
       await commandPatterns(cwd, args);
+      break;
+    case "portfolio":
+      await commandPortfolio(cwd, args);
       break;
     case "plan":
       await commandPlan(cwd, args);

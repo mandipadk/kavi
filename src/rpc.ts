@@ -300,6 +300,34 @@ export async function rpcUpdateMissionPolicy(
   });
 }
 
+export async function rpcApplyMissionBlueprint(
+  paths: AppPaths,
+  params: {
+    missionId: string;
+    prompt: string;
+  }
+): Promise<void> {
+  await sendRpcRequest(paths, "applyMissionBlueprint", {
+    missionId: params.missionId,
+    prompt: params.prompt
+  });
+}
+
+export async function rpcSetAgentContractStatus(
+  paths: AppPaths,
+  params: {
+    contractId: string;
+    status: "open" | "resolved" | "dismissed";
+    resolvedByTaskId?: string | null;
+  }
+): Promise<void> {
+  await sendRpcRequest(paths, "setAgentContractStatus", {
+    contractId: params.contractId,
+    status: params.status,
+    ...(typeof params.resolvedByTaskId === "string" ? { resolvedByTaskId: params.resolvedByTaskId } : {})
+  });
+}
+
 export async function rpcResolveApproval(
   paths: AppPaths,
   params: {

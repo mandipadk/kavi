@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { defaultConfig } from "./config.ts";
 import {
   addMissionCheckpoint,
+  applyMissionBlueprint,
   computeAcceptanceStatus,
   createMission,
   latestMission,
@@ -105,7 +106,8 @@ test("computeAcceptanceStatus stays pending until at least one real verification
   const mission = createMission(session, "Build a frontend and backend slice.");
 
   assert.equal(computeAcceptanceStatus(mission.acceptance), "pending");
-  assert.equal(mission.packetVersion, 2);
+  assert.equal(mission.packetVersion, 3);
+  assert.equal(mission.phase, "executing");
   assert.ok(mission.spec?.workstreamKinds.includes("frontend"));
   assert.ok(mission.contract?.acceptanceCriteria.length);
   assert.ok(mission.blueprint?.serviceBoundaries.length);
@@ -113,6 +115,8 @@ test("computeAcceptanceStatus stays pending until at least one real verification
   assert.ok(mission.policy?.gatePolicy.includes("acceptance"));
   assert.ok(Array.isArray(mission.risks));
   assert.ok(Array.isArray(mission.anchors));
+  assert.ok(Array.isArray(mission.specRevisions));
+  assert.ok(mission.simulation);
 
   const manualCheck = mission.acceptance.checks.find((check) => check.kind === "manual");
   assert.ok(manualCheck);
@@ -155,6 +159,8 @@ test("updateMissionPolicy applies autonomy and recovery overrides", () => {
     autoLand: true,
     pauseOnRepairFailure: false,
     retryBudget: 4,
+    operatorAttentionBudget: 9,
+    escalationPolicy: "strict",
     autopilotEnabled: true
   });
 
@@ -163,7 +169,95 @@ test("updateMissionPolicy applies autonomy and recovery overrides", () => {
   assert.equal(updated?.policy?.autoLand, true);
   assert.equal(updated?.policy?.pauseOnRepairFailure, false);
   assert.equal(updated?.policy?.retryBudget, 4);
+  assert.equal(updated?.policy?.operatorAttentionBudget, 9);
+  assert.equal(updated?.policy?.escalationPolicy, "strict");
   assert.equal(updated?.autopilotEnabled, true);
+});
+
+test("applyMissionBlueprint refreshes mission packet content and resets acceptance state", () => {
+  const session = buildSession();
+  const mission = createMission(session, "Write a tiny docs starter.");
+  mission.acceptance.checks[0].status = "failed";
+  mission.acceptance.failurePacks = [{
+    id: "failure-1",
+    missionId: mission.id,
+    checkId: mission.acceptance.checks[0]?.id ?? "check-1",
+    kind: mission.acceptance.checks[0]?.kind ?? "manual",
+    title: "Old failure",
+    summary: "Old verification failed.",
+    expected: [],
+    observed: [],
+    evidence: [],
+    likelyOwners: [],
+    likelyTaskIds: [],
+    attribution: null,
+    repairFocus: [],
+    command: null,
+    harnessPath: null,
+    serverCommand: null,
+    request: {
+      method: null,
+      urlPath: null,
+      routeCandidates: [],
+      headers: {},
+      body: null,
+      selector: null,
+      selectorCandidates: []
+    },
+    expectedSignals: {
+      title: null,
+      status: null,
+      contentType: null,
+      text: [],
+      jsonKeys: []
+    },
+    runtimeCapture: {
+      detail: "",
+      lastOutput: ""
+    },
+    createdAt: "2026-03-25T00:00:00.000Z",
+    updatedAt: "2026-03-25T00:00:00.000Z"
+  }];
+  mission.acceptance.repairPlans = [{
+    id: "repair-1",
+    missionId: mission.id,
+    title: "Repair old check",
+    owner: "claude",
+    status: "queued",
+    failureFingerprint: "fp-1",
+    failedCheckIds: ["check-1"],
+    failurePackIds: ["failure-1"],
+    summary: "Repair it",
+    prompt: "Repair it",
+    routeReason: "docs",
+    routeStrategy: "manual",
+    routeConfidence: 1,
+    claimedPaths: ["README.md"],
+    likelyOwners: ["claude"],
+    likelyTaskIds: [],
+    repairFocus: ["README.md"],
+    evidence: [],
+    createdAt: "2026-03-25T00:00:00.000Z",
+    updatedAt: "2026-03-25T00:00:00.000Z",
+    queuedTaskId: "task-repair"
+  }];
+  session.missions.push(mission);
+
+  const updated = applyMissionBlueprint(
+    session,
+    mission.id,
+    "Build a production-shaped frontend and backend starter with shared contracts and docs."
+  );
+
+  assert.ok(updated);
+  assert.equal(updated?.acceptance.status, "pending");
+  assert.equal(updated?.acceptance.failurePacks.length, 0);
+  assert.equal(updated?.acceptance.repairPlans.length, 0);
+  assert.equal(updated?.acceptance.checks.every((check) => check.status === "pending"), true);
+  assert.ok(updated?.spec?.workstreamKinds.includes("frontend"));
+  assert.ok(updated?.spec?.workstreamKinds.includes("backend"));
+  assert.ok(updated?.spec?.workstreamKinds.includes("shared_contract"));
+  assert.ok((updated?.specRevisions ?? []).length >= 2);
 });
 
 test("syncMissionStates moves a completed mission into awaiting_acceptance before land", () => {

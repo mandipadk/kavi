@@ -25,6 +25,15 @@ import {
 } from "./decision-ledger.ts";
 import { getWorktreeDiffReview, listWorktreeChangedPaths } from "./git.ts";
 import { executeLand } from "./landing.ts";
+import {
+  buildAutoAppliedContractTask,
+  contractTaskNodeKind,
+  resolveAgentContractsForTask,
+  setAgentContractStatus,
+  upsertAgentContractsFromTask,
+  upsertMissionReceipt
+} from "./mission-control.ts";
+import { auditBlocksShipping, buildMissionAuditReport } from "./quality-court.ts";
 import { verifyMissionAcceptanceById } from "./mission-verify.ts";
 import { nowIso } from "./paths.ts";
 import {
@@ -43,8 +52,10 @@ import {
 } from "./recommendations.ts";
 import {
   addMissionCheckpoint,
+  applyMissionBlueprint,
   attachMissionPlan,
   createMission,
+  latestMission,
   missionHasInFlightTasks,
   selectMission,
   syncMissionStates,
@@ -81,6 +92,7 @@ import { loadSessionRecord, readRecentEvents, recordEvent, saveSessionRecord } f
 import { loadTaskArtifact, saveTaskArtifact } from "./task-artifacts.ts";
 import type {
   AgentName,
+  AgentContract,
   AgentTurnEnvelope,
   AppPaths,
   ApprovalRuleDecision,
@@ -120,6 +132,10 @@ interface RpcNotification {
 interface RpcDispatchResult {
   result: unknown;
   shutdownAfterResponse?: boolean;
+}
+
+function uniqueArtifactPaths(left: string[], right: string[]): string[] {
+  return [...new Set([...left, ...right].map((value) => value.trim()).filter(Boolean))];
 }
 
 function summarizeProgressPaths(paths: string[]): string {
@@ -504,6 +520,16 @@ export class KaviDaemon {
         return {
           result: { ok: true }
         };
+      case "applyMissionBlueprint":
+        await this.applyMissionBlueprintFromRpc(params);
+        return {
+          result: { ok: true }
+        };
+      case "setAgentContractStatus":
+        await this.setAgentContractStatusFromRpc(params);
+        return {
+          result: { ok: true }
+        };
       case "shutdown":
         return {
           result: { ok: true },
@@ -715,6 +741,14 @@ export class KaviDaemon {
     if (missionHasInFlightTasks(session, mission.id)) {
       return "tasks are still in flight";
     }
+    const audit = buildMissionAuditReport(session, mission, []);
+    if (auditBlocksShipping(audit)) {
+      return `Quality Court blocked shipping: ${(audit?.objections ?? [])
+        .filter((objection) => objection.severity === "critical")
+        .slice(0, 2)
+        .map((objection) => objection.title)
+        .join(" | ") || audit?.summary || "release-blocking objections remain"}`;
+    }
     const otherActiveMissions = session.missions.filter(
       (item) =>
         item.id !== mission.id &&
@@ -890,6 +924,91 @@ export class KaviDaemon {
       missionId: task.missionId
     });
     await this.publishSnapshot("mission.autopilot_applied");
+  }
+
+  private async maybeAutopilotContract(): Promise<boolean> {
+    const pendingApprovals = (await listApprovalRequests(this.paths, { includeResolved: false }))
+      .filter((approval) => approval.status === "pending")
+      .length;
+    if (pendingApprovals > 0 || this.runningAgents.size > 0) {
+      return false;
+    }
+
+    const existingContractTaskIds = new Set(
+      this.session.tasks
+        .filter((task) => task.status === "pending" || task.status === "running" || task.status === "blocked")
+        .map((task) =>
+          typeof task.routeMetadata?.contractId === "string" ? task.routeMetadata.contractId : null
+        )
+        .filter((value): value is string => Boolean(value))
+    );
+    const candidates = (this.session.contracts ?? [])
+      .filter((contract) => contract.status === "open")
+      .filter((contract) => contract.targetAgent === "codex" || contract.targetAgent === "claude")
+      .filter((contract) => !existingContractTaskIds.has(contract.id))
+      .map((contract) => ({
+        contract,
+        mission: this.session.missions.find((mission) => mission.id === contract.missionId) ?? null
+      }))
+      .filter((entry) => entry.mission?.autopilotEnabled === true)
+      .filter((entry) => entry.mission?.policy?.autonomyLevel === "overnight")
+      .sort((left, right) => {
+        const severity =
+          (left.contract.dependencyImpact === "blocking" ? 2 : 0) +
+          (left.contract.urgency === "high" ? 2 : left.contract.urgency === "normal" ? 1 : 0);
+        const otherSeverity =
+          (right.contract.dependencyImpact === "blocking" ? 2 : 0) +
+          (right.contract.urgency === "high" ? 2 : right.contract.urgency === "normal" ? 1 : 0);
+        if (otherSeverity !== severity) {
+          return otherSeverity - severity;
+        }
+        return left.contract.createdAt.localeCompare(right.contract.createdAt);
+      });
+
+    const candidate = candidates[0];
+    if (!candidate || !candidate.mission) {
+      return false;
+    }
+
+    const taskId = `task-contract-${Date.now()}`;
+    const task = buildAutoAppliedContractTask(candidate.contract, taskId, {
+      routeReason: `Automatically applied open ${candidate.contract.kind} contract ${candidate.contract.id} during overnight-local execution.`,
+      maxRetries: resolveTaskRetryBudget(
+        this.session,
+        candidate.contract.missionId,
+        contractTaskNodeKind(candidate.contract),
+        "execution"
+      )
+    });
+
+    this.session.tasks.push(task);
+    addMissionCheckpoint(this.session, candidate.contract.missionId, {
+      kind: "task_progress",
+      title: "Overnight contract applied",
+      detail: `Kavi queued ${candidate.contract.targetAgent} work for contract ${candidate.contract.id}: ${candidate.contract.title}`,
+      taskId: task.id
+    });
+    addDecisionRecord(this.session, {
+      kind: "plan",
+      agent: task.owner,
+      taskId: task.id,
+      summary: `Overnight autopilot queued contract ${candidate.contract.id}`,
+      detail: candidate.contract.title,
+      metadata: {
+        missionId: candidate.contract.missionId,
+        contractId: candidate.contract.id,
+        targetAgent: candidate.contract.targetAgent
+      }
+    });
+    await saveSessionRecord(this.paths, this.session);
+    await recordEvent(this.paths, this.session.id, "contract.auto_applied", {
+      contractId: candidate.contract.id,
+      missionId: candidate.contract.missionId,
+      taskId: task.id,
+      owner: task.owner
+    });
+    await this.publishSnapshot("contract.auto_applied");
+    return true;
   }
 
   private async enqueueRpcTask(params: Record<string, unknown>): Promise<void> {
@@ -1359,6 +1478,102 @@ export class KaviDaemon {
     });
   }
 
+  private async applyMissionBlueprintFromRpc(params: Record<string, unknown>): Promise<void> {
+    const missionId = typeof params.missionId === "string" && params.missionId.trim()
+      ? params.missionId.trim()
+      : null;
+    const prompt = typeof params.prompt === "string" && params.prompt.trim()
+      ? params.prompt.trim()
+      : null;
+    if (!missionId || !prompt) {
+      throw new Error("Applying a mission blueprint requires missionId and prompt.");
+    }
+
+    await this.runMutation(async () => {
+      const mission = applyMissionBlueprint(this.session, missionId, prompt);
+      if (!mission) {
+        throw new Error(`Mission ${missionId} was not found.`);
+      }
+
+      addDecisionRecord(this.session, {
+        kind: "plan",
+        agent: "router",
+        taskId: mission.rootTaskId ?? mission.planningTaskId ?? null,
+        summary: `Updated mission blueprint for ${mission.id}`,
+        detail: "Operator applied a new blueprint/spec prompt to the mission.",
+        metadata: {
+          missionId: mission.id,
+          prompt
+        }
+      });
+      addMissionCheckpoint(this.session, mission.id, {
+        kind: "task_progress",
+        title: "Mission blueprint updated",
+        detail: "Operator updated the mission blueprint and reset acceptance to match the new intent.",
+        taskId: mission.rootTaskId ?? mission.planningTaskId ?? null
+      });
+      await saveSessionRecord(this.paths, this.session);
+      await recordEvent(this.paths, this.session.id, "mission.blueprint_applied", {
+        missionId: mission.id
+      });
+      await this.publishSnapshot("mission.blueprint_applied");
+    });
+  }
+
+  private async setAgentContractStatusFromRpc(params: Record<string, unknown>): Promise<void> {
+    const contractId = typeof params.contractId === "string" && params.contractId.trim()
+      ? params.contractId.trim()
+      : null;
+    const status =
+      params.status === "open" || params.status === "resolved" || params.status === "dismissed"
+        ? params.status
+        : null;
+    if (!contractId || !status) {
+      throw new Error("Updating a contract requires contractId and a valid status.");
+    }
+
+    await this.runMutation(async () => {
+      const contract = setAgentContractStatus(this.session, contractId, status, {
+        resolvedByTaskId:
+          typeof params.resolvedByTaskId === "string" && params.resolvedByTaskId.trim()
+            ? params.resolvedByTaskId.trim()
+            : null
+      });
+      if (!contract) {
+        throw new Error(`Contract ${contractId} was not found.`);
+      }
+
+      addDecisionRecord(this.session, {
+        kind: "plan",
+        agent: "router",
+        taskId: contract.sourceTaskId,
+        summary: `Updated contract ${contract.id} to ${contract.status}`,
+        detail: `Operator changed the contract lifecycle to ${contract.status}.`,
+        metadata: {
+          missionId: contract.missionId,
+          contractId: contract.id,
+          status: contract.status
+        }
+      });
+      const mission = this.session.missions.find((item) => item.id === contract.missionId) ?? null;
+      if (mission) {
+        addMissionCheckpoint(this.session, mission.id, {
+          kind: "task_progress",
+          title: `Contract ${contract.status}`,
+          detail: `${contract.title} is now ${contract.status}.`,
+          taskId: contract.sourceTaskId
+        });
+      }
+      await saveSessionRecord(this.paths, this.session);
+      await recordEvent(this.paths, this.session.id, "contract.status_changed", {
+        contractId: contract.id,
+        missionId: contract.missionId,
+        status: contract.status
+      });
+      await this.publishSnapshot("contract.status_changed");
+    });
+  }
+
   private async setBrainEntryPinnedFromRpc(params: Record<string, unknown>): Promise<void> {
     const entryId = typeof params.entryId === "string" && params.entryId.trim() ? params.entryId.trim() : null;
     if (!entryId) {
@@ -1485,6 +1700,19 @@ export class KaviDaemon {
         throw new Error(
           `Landing is blocked by ${pendingFollowUps.length} follow-up recommendation(s). Review or dismiss them before landing.`
         );
+      }
+      const mission = latestMission(this.session);
+      if (mission) {
+        const audit = buildMissionAuditReport(this.session, mission, []);
+        if (auditBlocksShipping(audit)) {
+          throw new Error(
+            `Landing is blocked by Quality Court: ${(audit?.objections ?? [])
+              .filter((objection) => objection.severity === "critical")
+              .slice(0, 3)
+              .map((objection) => objection.title)
+              .join(" | ") || audit?.summary || "release-blocking objections remain"}.`
+          );
+        }
       }
 
       const result = await executeLand(this.paths);
@@ -1977,7 +2205,10 @@ export class KaviDaemon {
         }
 
         if (readyTasks.length === 0) {
-          await this.maybeAutopilotFollowUp();
+          const appliedContract = await this.maybeAutopilotContract();
+          if (!appliedContract) {
+            await this.maybeAutopilotFollowUp();
+          }
         }
       });
 
@@ -2826,6 +3057,28 @@ export class KaviDaemon {
             this.session.repoRoot;
           await synthesizeMissionAcceptanceChecks(worktreePath, this.session, mission);
         }
+        const existingArtifact = await loadTaskArtifact(this.paths, task.id);
+        const artifactProgress = existingArtifact?.progress ?? [];
+        const artifactClaimedPaths = uniqueArtifactPaths(
+          existingArtifact?.claimedPaths ?? [],
+          task.claimedPaths
+        );
+        let createdContracts: AgentContract[] = [];
+        let resolvedContracts: AgentContract[] = [];
+        if (mission) {
+          upsertMissionReceipt(
+            this.session,
+            mission,
+            task,
+            {
+              progress: artifactProgress,
+              claimedPaths: artifactClaimedPaths
+            },
+            envelope
+          );
+          createdContracts = upsertAgentContractsFromTask(this.session, mission, task, envelope);
+          resolvedContracts = resolveAgentContractsForTask(this.session, task);
+        }
         this.syncSessionDerivedState();
         await saveSessionRecord(this.paths, this.session);
 
@@ -2834,7 +3087,6 @@ export class KaviDaemon {
           task,
           task.owner === "claude" ? "claude" : "codex"
         );
-        const existingArtifact = await loadTaskArtifact(this.paths, task.id);
         await saveTaskArtifact(this.paths, {
           taskId: task.id,
           sessionId: this.session.id,
@@ -2883,6 +3135,40 @@ export class KaviDaemon {
           peerMessages: peerMessages.length,
           materializedPlanCount
         });
+        for (const contract of createdContracts) {
+          addDecisionRecord(this.session, {
+            kind: "plan",
+            agent: contract.sourceAgent,
+            taskId: contract.sourceTaskId,
+            summary: `Opened agent contract ${contract.id}`,
+            detail: `${contract.sourceAgent} requested ${contract.kind} from ${contract.targetAgent}: ${contract.title}`,
+            metadata: {
+              missionId: contract.missionId,
+              contractId: contract.id,
+              targetAgent: contract.targetAgent,
+              dependencyImpact: contract.dependencyImpact
+            }
+          });
+          await recordEvent(this.paths, this.session.id, "contract.opened", {
+            contractId: contract.id,
+            missionId: contract.missionId,
+            sourceTaskId: contract.sourceTaskId,
+            sourceAgent: contract.sourceAgent,
+            targetAgent: contract.targetAgent,
+            kind: contract.kind
+          });
+        }
+        for (const contract of resolvedContracts) {
+          await recordEvent(this.paths, this.session.id, "contract.resolved", {
+            contractId: contract.id,
+            missionId: contract.missionId,
+            resolvedByTaskId: contract.resolvedByTaskId,
+            targetAgent: contract.targetAgent
+          });
+        }
+        if (createdContracts.length > 0 || resolvedContracts.length > 0) {
+          await saveSessionRecord(this.paths, this.session);
+        }
         for (const note of autoResolvedNotes) {
           await recordEvent(this.paths, this.session.id, "review.note_auto_resolved", {
             reviewNoteId: note.id,
@@ -3061,6 +3347,19 @@ export class KaviDaemon {
           }
         }
         const failedMission = this.session.missions.find((item) => item.id === task.missionId) ?? null;
+        if (failedMission) {
+          upsertMissionReceipt(
+            this.session,
+            failedMission,
+            task,
+            {
+              progress: existingArtifact?.progress ?? [],
+              claimedPaths: uniqueArtifactPaths(existingArtifact?.claimedPaths ?? [], task.claimedPaths)
+            },
+            null
+          );
+          resolveAgentContractsForTask(this.session, task);
+        }
         if (
           failedMission &&
           task.nodeKind === "repair" &&

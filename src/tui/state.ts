@@ -104,11 +104,21 @@ export interface ReviewFilterState {
 
 export interface BrainFilterState {
   query: string;
-  category: "all" | "fact" | "decision" | "procedure" | "risk" | "artifact";
+  category:
+    | "all"
+    | "fact"
+    | "decision"
+    | "procedure"
+    | "risk"
+    | "artifact"
+    | "topology"
+    | "contract"
+    | "failure"
+    | "verification";
   scope: "all" | "repo" | "mission" | "personal" | "pattern";
   includeRetired: boolean;
   focusArea: "entries" | "related" | "graph" | "evidence";
-  graphMode: "all" | "structural" | "knowledge";
+  graphMode: "all" | "structural" | "knowledge" | "topology" | "failure" | "contract" | "timeline";
   pathHint: string;
 }
 
