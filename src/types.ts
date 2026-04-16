@@ -804,6 +804,44 @@ export interface PatternBenchmark {
   antiPatternSignals: string[];
 }
 
+export interface PortfolioCommandHabit {
+  command: string;
+  count: number;
+  repoRoots: string[];
+  labels: string[];
+}
+
+export interface PortfolioStartingPoint {
+  templateId: string;
+  label: string;
+  score: number;
+  benchmarkScore: number;
+  repoRoots: string[];
+  stacks: string[];
+  nodeKinds: string[];
+  commands: string[];
+  acceptanceCriteria: string[];
+  antiPatternSignals: string[];
+  reasons: string[];
+}
+
+export interface PortfolioClusterInsight {
+  id: string;
+  labels: string[];
+  repoRoots: string[];
+  repoCount: number;
+  stacks: string[];
+  nodeKinds: string[];
+  commandHabits: PortfolioCommandHabit[];
+  acceptanceCriteria: Array<{ value: string; count: number }>;
+  antiPatternHotspots: Array<{ value: string; count: number }>;
+  benchmarkScore: number;
+  templateIds: string[];
+  recommendedTemplateIds: string[];
+  summary: string;
+  score: number;
+}
+
 export interface PatternComposition {
   prompt: string;
   templateIds: string[];
@@ -876,6 +914,9 @@ export interface PatternConstellation {
     sharedRepos: string[];
     score: number;
   }>;
+  commandHabits: PortfolioCommandHabit[];
+  clusterInsights: PortfolioClusterInsight[];
+  startingPoints: PortfolioStartingPoint[];
   templates: PatternTemplate[];
 }
 
@@ -1023,9 +1064,16 @@ export interface MissionMorningBrief {
   firstActions: string[];
 }
 
+export type QualityCourtRole =
+  | "verifier"
+  | "contract_auditor"
+  | "integration_auditor"
+  | "risk_auditor";
+
 export interface MissionObjection {
   id: string;
   missionId: string;
+  role: QualityCourtRole;
   severity: "critical" | "major" | "minor";
   kind:
     | "acceptance"
@@ -1043,6 +1091,15 @@ export interface MissionObjection {
   suggestedAction: string | null;
 }
 
+export interface QualityCourtRoleReport {
+  role: QualityCourtRole;
+  verdict: "approved" | "warn" | "blocked";
+  score: number;
+  summary: string;
+  approvals: string[];
+  objections: MissionObjection[];
+}
+
 export interface MissionAuditReport {
   missionId: string;
   verdict: "approved" | "warn" | "blocked";
@@ -1050,6 +1107,8 @@ export interface MissionAuditReport {
   summary: string;
   approvals: string[];
   objections: MissionObjection[];
+  roleReports: QualityCourtRoleReport[];
+  dominantRoles: QualityCourtRole[];
   receiptsReviewed: number;
   checksReviewed: number;
   contractsReviewed: number;
@@ -1086,8 +1145,30 @@ export interface TaskProgressEntry {
   createdAt: string;
   provider?: AgentName | "node" | null;
   eventName?: string | null;
+  semanticKind?: ProviderSemanticKind | null;
   source?: "notification" | "stderr" | "stdout" | "delta" | "worktree" | "hook" | "transcript" | null;
 }
+
+export type ProviderSemanticKind =
+  | "planning"
+  | "reasoning"
+  | "inspection"
+  | "scaffold"
+  | "editing"
+  | "command"
+  | "verification"
+  | "blocker"
+  | "approval"
+  | "handoff"
+  | "contract"
+  | "review"
+  | "tool"
+  | "session"
+  | "notification"
+  | "runtime"
+  | "failure"
+  | "completion"
+  | "artifact";
 
 export interface ProviderCapabilityManifest {
   provider: AgentName | "node";

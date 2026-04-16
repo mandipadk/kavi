@@ -291,6 +291,8 @@ test("buildPatternStudio combines composition, benchmark, and constellation evid
   assert.ok(studio.composition.templateIds.length >= 1);
   assert.ok(studio.selectedBenchmarks.length >= 1);
   assert.ok(studio.relatedRepoClusters.length >= 1);
+  assert.ok(studio.relatedClusterInsights.length >= 1);
+  assert.ok(studio.relatedStartingPoints.length >= 1);
   assert.ok(studio.topStacks.some((item) => item.value === "typescript"));
 });
 
@@ -337,8 +339,13 @@ test("captureMissionAntiPatterns and buildPatternConstellation surface recurring
   assert.ok(constellation.repoLinks.some((link) => link.sharedStacks.includes("typescript")));
   assert.ok(constellation.repoClusters.length >= 1);
   assert.ok(constellation.repoClusters.some((cluster) => cluster.labels.includes(path.basename(repoRoot))));
+  assert.ok(constellation.clusterInsights.length >= 1);
+  assert.ok(constellation.clusterInsights.some((cluster) => cluster.commandHabits.length >= 1));
   assert.ok(constellation.templates.length >= 1);
   assert.ok(constellation.templateLinks.length >= 1);
+  assert.ok(constellation.commandHabits.some((habit) => habit.command === "npm test"));
+  assert.ok(constellation.startingPoints.length >= 1);
+  assert.ok(constellation.startingPoints.some((entry) => entry.benchmarkScore > 0));
   assert.ok(constellation.antiPatternHotspots.some((item) => item.value.includes("docs expectations")));
 });
 
@@ -382,5 +389,8 @@ test("buildPatternConstellation derives useful signals from legacy sparse patter
   assert.ok(constellation.topStacks.some((item) => item.value === "typescript"));
   assert.ok(constellation.topNodeKinds.some((item) => item.value === "frontend"));
   assert.ok(constellation.topNodeKinds.some((item) => item.value === "backend"));
+  assert.ok(constellation.topCommands.every((item) => !item.value.includes(".kavi/runtime/")));
+  assert.ok(constellation.commandHabits.some((habit) => habit.command === "npm run build"));
+  assert.ok(constellation.startingPoints.length >= 1);
   assert.ok(!constellation.topTags.some((item) => item.value === "with"));
 });

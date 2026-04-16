@@ -207,6 +207,10 @@ test("buildMissionAuditReport blocks missions with failed acceptance and blockin
   assert.equal(report?.verdict, "blocked");
   assert.ok(report?.objections.some((objection) => objection.kind === "acceptance"));
   assert.ok(report?.objections.some((objection) => objection.kind === "contract"));
+  assert.ok(report?.roleReports.some((role) => role.role === "verifier" && role.verdict === "blocked"));
+  assert.ok(report?.roleReports.some((role) => role.role === "contract_auditor" && role.verdict === "blocked"));
+  assert.ok(report?.dominantRoles.includes("verifier"));
+  assert.ok(report?.objections.every((objection) => typeof objection.role === "string"));
 });
 
 test("buildMissionAuditReport approves verified missions with receipts and no blockers", () => {
@@ -261,4 +265,6 @@ test("buildMissionAuditReport approves verified missions with receipts and no bl
   assert.equal(report?.verdict, "approved");
   assert.equal(report?.objections.length, 0);
   assert.ok(report?.approvals.some((item) => /Acceptance has passed/i.test(item)));
+  assert.ok(report?.roleReports.every((role) => role.verdict === "approved"));
+  assert.deepEqual(report?.dominantRoles, []);
 });

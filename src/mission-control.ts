@@ -315,6 +315,7 @@ function extractVerificationEvidence(progress: TaskProgressEntry[], envelope: Ag
   const evidence = progress
     .filter(
       (entry) =>
+        entry.semanticKind === "verification" ||
         entry.eventName === "verification" ||
         /verify|verification|test|passed|validated/i.test(entry.summary)
     )

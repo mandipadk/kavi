@@ -139,6 +139,60 @@ test("task artifacts normalize missing progress to an empty array", async () => 
   assert.deepEqual(loaded.attempts, []);
 });
 
+test("task artifacts preserve semantic progress kinds", async () => {
+  const repoRoot = await mkdtemp(path.join(os.tmpdir(), "kavi-artifacts-semantic-"));
+  const paths = resolveAppPaths(repoRoot);
+
+  await saveTaskArtifact(paths, {
+    taskId: "task-semantic",
+    sessionId: "session-1",
+    missionId: null,
+    title: "Semantic artifact",
+    owner: "claude",
+    kind: "execution",
+    nodeKind: null,
+    status: "running",
+    summary: null,
+    dependsOnTaskIds: [],
+    parentTaskId: null,
+    planId: null,
+    planNodeKey: null,
+    retryCount: 0,
+    maxRetries: 1,
+    lastFailureSummary: null,
+    routeReason: null,
+    routeStrategy: null,
+    routeConfidence: null,
+    routeMetadata: {},
+    claimedPaths: ["apps/web/app/page.tsx"],
+    decisionReplay: [],
+    rawOutput: null,
+    error: null,
+    envelope: null,
+    reviewNotes: [],
+    startedAt: "2026-03-24T00:00:00.000Z",
+    finishedAt: null,
+    nextRecommendation: null,
+    progress: [
+      {
+        id: "progress-1",
+        kind: "provider",
+        summary: "Claude planning: refine the dashboard flow before editing the page shell.",
+        paths: ["apps/web/app/page.tsx"],
+        createdAt: "2026-03-24T00:00:30.000Z",
+        provider: "claude",
+        eventName: "planning",
+        semanticKind: "planning",
+        source: "transcript"
+      }
+    ],
+    attempts: []
+  });
+
+  const loaded = await loadTaskArtifact(paths, "task-semantic");
+  assert.equal(loaded?.progress[0]?.semanticKind, "planning");
+});
+
 test("task artifacts preserve null finishedAt for running work", async () => {
   const repoRoot = await mkdtemp(path.join(os.tmpdir(), "kavi-artifacts-running-"));
   const paths = resolveAppPaths(repoRoot);

@@ -102,6 +102,7 @@ import type {
   Mission,
   MissionAutonomyLevel,
   PeerMessage,
+  ProviderSemanticKind,
   ReviewAssignee,
   SessionRecord,
   SnapshotSubscriptionEvent,
@@ -132,6 +133,59 @@ interface RpcNotification {
 interface RpcDispatchResult {
   result: unknown;
   shutdownAfterResponse?: boolean;
+}
+
+function formatSemanticCheckpointTitle(params: {
+  taskTitle: string;
+  provider?: AgentName | "node" | null;
+  semanticKind?: ProviderSemanticKind | null;
+  kind: TaskProgressEntry["kind"];
+}): string {
+  const providerLabel =
+    params.provider === "codex" ? "Codex" : params.provider === "claude" ? "Claude" : params.provider === "node" ? "Runtime" : "Task";
+  if (params.kind === "stalled") {
+    return `Task stalled: ${params.taskTitle}`;
+  }
+  switch (params.semanticKind ?? null) {
+    case "planning":
+      return `${providerLabel} planning update: ${params.taskTitle}`;
+    case "reasoning":
+      return `${providerLabel} reasoning update: ${params.taskTitle}`;
+    case "inspection":
+      return `${providerLabel} inspection update: ${params.taskTitle}`;
+    case "scaffold":
+      return `${providerLabel} scaffold update: ${params.taskTitle}`;
+    case "editing":
+      return `${providerLabel} implementation update: ${params.taskTitle}`;
+    case "command":
+      return `${providerLabel} command update: ${params.taskTitle}`;
+    case "verification":
+      return `${providerLabel} verification update: ${params.taskTitle}`;
+    case "blocker":
+      return `${providerLabel} blocker: ${params.taskTitle}`;
+    case "approval":
+      return `${providerLabel} approval update: ${params.taskTitle}`;
+    case "handoff":
+      return `${providerLabel} handoff: ${params.taskTitle}`;
+    case "contract":
+      return `${providerLabel} contract update: ${params.taskTitle}`;
+    case "review":
+      return `${providerLabel} review update: ${params.taskTitle}`;
+    case "tool":
+      return `${providerLabel} tool activity: ${params.taskTitle}`;
+    case "session":
+      return `${providerLabel} session update: ${params.taskTitle}`;
+    case "notification":
+      return `${providerLabel} notification: ${params.taskTitle}`;
+    case "failure":
+      return `${providerLabel} runtime failure: ${params.taskTitle}`;
+    case "completion":
+      return `${providerLabel} completion update: ${params.taskTitle}`;
+    case "artifact":
+      return `${providerLabel} artifact update: ${params.taskTitle}`;
+    default:
+      return `${providerLabel} runtime update: ${params.taskTitle}`;
+  }
 }
 
 function uniqueArtifactPaths(left: string[], right: string[]): string[] {
@@ -2476,6 +2530,7 @@ export class KaviDaemon {
     metadata: {
       provider?: AgentName | "node" | null;
       eventName?: string | null;
+      semanticKind?: ProviderSemanticKind | null;
       source?: TaskProgressEntry["source"] | null;
     } = {}
   ): Promise<void> {
@@ -2497,6 +2552,7 @@ export class KaviDaemon {
         lastEntry &&
         lastEntry.kind === kind &&
         lastEntry.summary === summary &&
+        (lastEntry.semanticKind ?? null) === (metadata.semanticKind ?? null) &&
         lastEntry.paths.join("\n") === paths.join("\n")
       ) {
         return;
@@ -2510,6 +2566,7 @@ export class KaviDaemon {
         createdAt: nowIso(),
         provider: metadata.provider ?? null,
         eventName: metadata.eventName ?? null,
+        semanticKind: metadata.semanticKind ?? null,
         source: metadata.source ?? null
       };
       artifact.progress.push(progressEntry);
@@ -2518,12 +2575,12 @@ export class KaviDaemon {
       artifact.lastFailureSummary = task.lastFailureSummary;
       await saveTaskArtifact(this.paths, artifact);
 
-      const checkpointTitle =
-        kind === "stalled"
-          ? `Task stalled: ${task.title}`
-          : kind === "provider" && metadata.provider && metadata.eventName
-            ? `${metadata.provider === "codex" ? "Codex" : metadata.provider === "claude" ? "Claude" : "Runtime"} ${metadata.eventName.replaceAll(/[-_]+/g, " ")}`
-            : `Task progress: ${task.title}`;
+      const checkpointTitle = formatSemanticCheckpointTitle({
+        taskTitle: task.title,
+        provider: metadata.provider ?? null,
+        semanticKind: metadata.semanticKind ?? null,
+        kind
+      });
       addMissionCheckpoint(this.session, task.missionId, {
         kind: kind === "stalled" ? "task_stalled" : "task_progress",
         title: checkpointTitle,
@@ -2539,6 +2596,7 @@ export class KaviDaemon {
         summary,
         provider: metadata.provider ?? null,
         eventName: metadata.eventName ?? null,
+        semanticKind: metadata.semanticKind ?? null,
         source: metadata.source ?? null
       });
       await this.publishSnapshot("task.progress");
@@ -2792,6 +2850,7 @@ export class KaviDaemon {
         void this.appendTaskProgress(taskId, "provider", event.paths, event.summary, {
           provider: event.provider,
           eventName: event.eventName,
+          semanticKind: event.semanticKind,
           source: event.source
         });
       }
@@ -2816,6 +2875,7 @@ export class KaviDaemon {
         void this.appendTaskProgress(taskId, "provider", event.paths, event.summary, {
           provider: event.provider,
           eventName: event.eventName,
+          semanticKind: event.semanticKind,
           source: event.source
         });
       }
@@ -2880,6 +2940,7 @@ export class KaviDaemon {
           await this.appendTaskProgress(taskId, "provider", event.paths, event.summary, {
             provider: event.provider,
             eventName: event.eventName,
+            semanticKind: event.semanticKind,
             source: event.source
           });
         }
@@ -2919,6 +2980,7 @@ export class KaviDaemon {
             void this.appendTaskProgress(taskId, "provider", event.paths, event.summary, {
               provider: event.provider,
               eventName: event.eventName,
+              semanticKind: event.semanticKind,
               source: event.source
             });
           },

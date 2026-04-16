@@ -359,7 +359,8 @@ test("buildWorkflowSummary exposes critical path and next ready nodes for the ac
           kind: "provider",
           summary: "Claude is refining the main UI shell.",
           paths: ["src/ui.tsx"],
-          createdAt: "2026-03-25T00:05:30.000Z"
+          createdAt: "2026-03-25T00:05:30.000Z",
+          semanticKind: "editing"
         }
       ],
       attempts: [],
@@ -373,6 +374,7 @@ test("buildWorkflowSummary exposes critical path and next ready nodes for the ac
   assert.deepEqual(summary.missionObservability?.criticalPath, ["Polish UI", "Run tests"]);
   assert.equal(summary.missionObservability?.nextReadyNodes.length, 0);
   assert.equal(summary.missionObservability?.recentProgress[0]?.kind, "provider");
+  assert.equal(summary.missionObservability?.recentProgress[0]?.semanticKind, "editing");
   assert.equal(summary.missionObservability?.activeOwners.includes("claude"), true);
 });
 

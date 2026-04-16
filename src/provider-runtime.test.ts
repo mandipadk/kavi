@@ -54,6 +54,7 @@ test("parseCodexAssistantDeltaText extracts semantic draft progress from streame
   assert.equal(events[0]?.provider, "codex");
   assert.equal(events[0]?.source, "delta");
   assert.equal(events[0]?.eventName, "edit");
+  assert.equal(events[0]?.semanticKind, "editing");
   assert.match(events[0]?.summary ?? "", /Codex progress:/);
   assert.ok(events[0]?.paths.includes("apps/api/src/server.ts"));
 });
@@ -68,8 +69,10 @@ test("parseCodexNotificationEvent extracts command and planning semantics", () =
   });
 
   assert.equal(command?.eventName, "command-complete");
+  assert.equal(command?.semanticKind, "command");
   assert.match(command?.summary ?? "", /completed `npm test`/i);
   assert.equal(planning?.eventName, "planning");
+  assert.equal(planning?.semanticKind, "planning");
   assert.match(planning?.summary ?? "", /Codex planning:/);
 });
 
@@ -124,7 +127,9 @@ test("parseClaudeTranscriptLine extracts assistant text and tool activity from t
   assert.equal(assistant.events.length, 2);
   assert.equal(assistant.events[0]?.source, "transcript");
   assert.equal(assistant.events[0]?.eventName, "edit");
+  assert.equal(assistant.events[0]?.semanticKind, "scaffold");
   assert.equal(assistant.events[1]?.eventName, "file-change");
+  assert.equal(assistant.events[1]?.semanticKind, "editing");
   assert.ok(assistant.events[1]?.paths.includes("apps/web/app/page.tsx"));
 });
 
@@ -194,11 +199,34 @@ test("parseClaudeTranscriptLine classifies blockers from assistant text", () => 
   }));
 
   assert.equal(parsed.events[0]?.eventName, "blocker");
+  assert.equal(parsed.events[0]?.semanticKind, "blocker");
   assert.match(parsed.events[0]?.summary ?? "", /Claude blocker/i);
 });
 
 test("parseCodexAssistantDeltaText classifies tool lifecycle summaries", () => {
   const events = parseCodexAssistantDeltaText(`Called exec_command to inspect apps/api/src/server.ts before patching it.`);
   assert.equal(events[0]?.eventName, "tool");
+  assert.equal(events[0]?.semanticKind, "inspection");
   assert.match(events[0]?.summary ?? "", /Codex tool:/);
+});
+
+test("provider runtime classification upgrades handoff and contract semantics", () => {
+  const handoff = parseCodexAssistantDeltaText(
+    `Next for Claude: take the dashboard shell in apps/web and refine the intake UX after this backend scaffold lands.`
+  );
+  const contract = parseClaudeTranscriptLine(JSON.stringify({
+    type: "assistant",
+    uuid: "assistant-5",
+    message: {
+      content: [
+        {
+          type: "text",
+          text: "I need an API contract stub for the visit summary endpoint before I can finish the UI."
+        }
+      ]
+    }
+  }));
+
+  assert.equal(handoff[0]?.semanticKind, "handoff");
+  assert.equal(contract.events[0]?.semanticKind, "contract");
 });

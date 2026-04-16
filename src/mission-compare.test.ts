@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { arenaSortValue, compareMissionFamily, compareMissions } from "./mission-compare.ts";
+import { arenaSortValue, buildShadowMergePlan, compareMissionFamily, compareMissions } from "./mission-compare.ts";
 import type { KaviSnapshot, Mission, TaskArtifact, TaskSpec } from "./types.ts";
 
 function task(
@@ -575,4 +575,140 @@ test("compareMissionFamily can rank shadow alternatives by lower risk", () => {
 
   assert.equal(family[0]?.rightMission.id, "mission-safer");
   assert.ok(arenaSortValue(family[0]!, "risk") > arenaSortValue(family[1]!, "risk"));
+});
+
+test("buildShadowMergePlan defaults to source-only paths and recommends the dominant owner", () => {
+  const leftMission: Mission = {
+    id: "mission-left",
+    title: "Primary",
+    prompt: "Primary",
+    goal: null,
+    mode: "guided_autopilot",
+    status: "running",
+    summary: "Primary mission.",
+    planningTaskId: null,
+    planId: null,
+    rootTaskId: "left-codex",
+    activeTaskIds: [],
+    autopilotEnabled: true,
+    acceptance: {
+      id: "accept-left",
+      summary: "Left acceptance",
+      criteria: [],
+      checks: [],
+      status: "pending",
+      createdAt: "2026-04-08T00:00:00.000Z",
+      updatedAt: "2026-04-08T00:00:00.000Z"
+    },
+    checkpoints: [],
+    brainEntryIds: [],
+    createdAt: "2026-04-08T00:00:00.000Z",
+    updatedAt: "2026-04-08T00:10:00.000Z",
+    landedAt: null
+  };
+  const rightMission: Mission = {
+    ...leftMission,
+    id: "mission-right",
+    title: "Shadow",
+    shadowOfMissionId: "mission-left"
+  };
+  const snapshot: KaviSnapshot = {
+    session: {
+      id: "session-merge",
+      repoRoot: "/tmp/repo",
+      baseCommit: "base",
+      createdAt: "2026-04-08T00:00:00.000Z",
+      updatedAt: "2026-04-08T00:10:00.000Z",
+      socketPath: "/tmp/repo/.kavi.sock",
+      status: "running",
+      goal: null,
+      fullAccessMode: false,
+      daemonPid: null,
+      daemonHeartbeatAt: null,
+      config: {
+        version: 1,
+        baseBranch: "main",
+        validationCommand: "",
+        messageLimit: 10,
+        routing: {
+          frontendKeywords: [],
+          backendKeywords: [],
+          codexPaths: [],
+          claudePaths: []
+        },
+        agents: {
+          codex: { role: "backend", model: "gpt-5" },
+          claude: { role: "frontend", model: "claude" }
+        }
+      },
+      runtime: {
+        nodeExecutable: "node",
+        codexExecutable: "codex",
+        claudeExecutable: "claude",
+        kaviEntryPoint: "dist/main.js"
+      },
+      worktrees: [],
+      tasks: [
+        {
+          ...task("left-codex", "mission-left", "codex", "completed", "2026-04-08T00:09:00.000Z"),
+          claimedPaths: ["apps/api/server.ts"]
+        },
+        {
+          ...task("right-claude", "mission-right", "claude", "completed", "2026-04-08T00:09:30.000Z"),
+          claimedPaths: ["apps/web/app/page.tsx", "apps/web/components/nav.tsx"]
+        }
+      ],
+      plans: [],
+      missions: [leftMission, rightMission],
+      receipts: [],
+      contracts: [],
+      brain: [],
+      providerCapabilities: [],
+      peerMessages: [],
+      decisions: [],
+      pathClaims: [],
+      reviewNotes: [],
+      recommendationStates: [],
+      agentStatus: {
+        codex: {
+          agent: "codex",
+          available: true,
+          transport: "codex-app-server",
+          lastRunAt: null,
+          lastExitCode: null,
+          sessionId: null,
+          summary: null
+        },
+        claude: {
+          agent: "claude",
+          available: true,
+          transport: "claude-print",
+          lastRunAt: null,
+          lastExitCode: null,
+          sessionId: null,
+          summary: null
+        }
+      }
+    },
+    approvals: [],
+    events: [],
+    worktreeDiffs: [],
+    latestLandReport: null
+  };
+  const artifacts = [
+    {
+      ...artifact("left-codex", "left", "2026-04-08T00:09:00.000Z"),
+      claimedPaths: ["apps/api/server.ts"]
+    },
+    {
+      ...artifact("right-claude", "right", "2026-04-08T00:09:30.000Z"),
+      claimedPaths: ["apps/web/app/page.tsx", "apps/web/components/nav.tsx"]
+    }
+  ];
+
+  const plan = buildShadowMergePlan(snapshot, leftMission, rightMission, artifacts);
+
+  assert.deepEqual(plan.selectedPaths, ["apps/web/app/page.tsx", "apps/web/components/nav.tsx"]);
+  assert.equal(plan.recommendedOwner, "claude");
+  assert.equal(plan.sourceTasks[0]?.owner, "claude");
 });

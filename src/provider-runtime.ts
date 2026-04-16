@@ -1,10 +1,11 @@
-import type { AgentName } from "./types.ts";
+import type { AgentName, ProviderSemanticKind } from "./types.ts";
 
 export interface ProviderRuntimeEvent {
   provider: AgentName;
   summary: string;
   paths: string[];
   eventName: string | null;
+  semanticKind: ProviderSemanticKind;
   source: "notification" | "stderr" | "stdout" | "delta" | "hook" | "transcript";
 }
 
@@ -277,6 +278,111 @@ function classifyClaudeAssistantText(text: string): string {
   return "assistant-text";
 }
 
+function isHandoffText(value: string): boolean {
+  const lower = value.toLowerCase();
+  return (
+    /(handoff|context share|pass(?:ing)? to|over to|next for (?:claude|codex)|pick up next|follow up next)/.test(lower) &&
+    /(claude|codex)/.test(lower)
+  );
+}
+
+function isContractText(value: string): boolean {
+  const lower = value.toLowerCase();
+  return /(api contract|schema contract|contract stub|backend stub|interface contract|request contract)/.test(lower);
+}
+
+function isReviewText(value: string): boolean {
+  const lower = value.toLowerCase();
+  return /(review|audit|judge|quality court|risk check|verification request)/.test(lower);
+}
+
+function deriveSemanticKind(eventName: string | null, summary: string): ProviderSemanticKind {
+  const normalizedSummary = normalizeLine(summary).toLowerCase();
+  if (isHandoffText(normalizedSummary)) {
+    return "handoff";
+  }
+  if (isContractText(normalizedSummary)) {
+    return "contract";
+  }
+  if (isReviewText(normalizedSummary)) {
+    return "review";
+  }
+
+  switch (eventName) {
+    case "planning":
+      return /scaffold|bootstrap|shell|skeleton/.test(normalizedSummary) ? "scaffold" : "planning";
+    case "reasoning":
+      return "reasoning";
+    case "inspection":
+      return "inspection";
+    case "file-plan":
+      return /scaffold|bootstrap|shell|skeleton/.test(normalizedSummary) ? "scaffold" : "editing";
+    case "file-change":
+    case "edit":
+      return /scaffold|bootstrap|shell|skeleton/.test(normalizedSummary) ? "scaffold" : "editing";
+    case "command":
+    case "command-running":
+    case "command-complete":
+      return "command";
+    case "verification":
+      return "verification";
+    case "blocker":
+      return "blocker";
+    case "approval":
+    case "command-approval":
+    case "file-approval":
+    case "tool-request":
+      return "approval";
+    case "tool-use":
+    case "tool-complete":
+    case "tool-result":
+      return "tool";
+    case "assistant-delta":
+    case "assistant-message":
+    case "assistant-text":
+      return "runtime";
+    case "step-started":
+    case "step-completed":
+      return "runtime";
+    case "step-failed":
+    case "tool-failed":
+    case "command-failed":
+      return "failure";
+    case "session":
+    case "turn":
+      return "session";
+    case "turn-completed":
+    case "stop":
+      return "completion";
+    case "notification":
+      return "notification";
+    case "structured-output":
+      return "artifact";
+    default:
+      break;
+  }
+
+  if (/error|failed|traceback|exception/.test(normalizedSummary)) {
+    return "failure";
+  }
+  if (/verify|validated|tests?\b|lint|typecheck|smoke/.test(normalizedSummary)) {
+    return "verification";
+  }
+  if (/plan|milestone|graph|next step|scaffold|blueprint/.test(normalizedSummary)) {
+    return /scaffold|bootstrap|shell|skeleton/.test(normalizedSummary) ? "scaffold" : "planning";
+  }
+  if (/read|inspect|search|grep|glob|trace|looked at|looked into/.test(normalizedSummary)) {
+    return "inspection";
+  }
+  if (/create|implement|build|update|edit|write|add|remove|refactor/.test(normalizedSummary)) {
+    return /scaffold|bootstrap|shell|skeleton/.test(normalizedSummary) ? "scaffold" : "editing";
+  }
+  if (/run|running|execute|executing|install|installed|build|built|compile|compiled/.test(normalizedSummary)) {
+    return "command";
+  }
+  return "runtime";
+}
+
 function summarizeClaudeHookEvent(
   eventName: string,
   payload: Record<string, unknown>
@@ -355,6 +461,7 @@ export function parseClaudeHookEvent(
       summary: truncate(summary.summary),
       paths: extractPathsFromParams(payload),
       eventName: summary.eventName,
+      semanticKind: deriveSemanticKind(summary.eventName, summary.summary),
       source: "hook"
     }
   ];
@@ -404,6 +511,7 @@ export function parseClaudeTranscriptLine(
             summary: truncate(`${prefix}: ${text}`),
             paths: extractPaths(text),
             eventName,
+            semanticKind: deriveSemanticKind(eventName, text),
             source: "transcript"
           });
         }
@@ -419,6 +527,7 @@ export function parseClaudeTranscriptLine(
           summary: truncate(event.summary),
           paths: event.paths,
           eventName: event.eventName,
+          semanticKind: deriveSemanticKind(event.eventName, event.summary),
           source: "transcript"
         });
       }
@@ -454,6 +563,7 @@ export function parseClaudeTranscriptLine(
           summary: truncate(summary),
           paths: event.paths,
           eventName: event.eventName,
+          semanticKind: deriveSemanticKind(event.eventName, summary),
           source: "transcript"
         }
       ]
@@ -472,6 +582,7 @@ export function parseClaudeTranscriptLine(
             summary: "Claude emitted structured output.",
             paths: [],
             eventName: "structured-output",
+            semanticKind: "artifact",
             source: "transcript"
           }
         ]
@@ -682,6 +793,7 @@ export function parseCodexNotificationEvent(
     summary: truncate(summary),
     paths: extractPathsFromParams(params),
     eventName,
+    semanticKind: deriveSemanticKind(eventName, summary),
     source: "notification"
   };
 }
@@ -727,6 +839,7 @@ export function parseClaudeRuntimeText(chunk: string): ProviderRuntimeEvent[] {
         summary: `Claude runtime: ${truncate(line)}`,
         paths: extractPaths(line),
         eventName,
+        semanticKind: deriveSemanticKind(eventName, line),
         source: "stderr" as const
       };
     })
@@ -803,6 +916,7 @@ export function parseCodexAssistantDeltaText(chunk: string): ProviderRuntimeEven
         summary: `${prefix}: ${truncate(compact)}`,
         paths: extractPaths(compact),
         eventName,
+        semanticKind: deriveSemanticKind(eventName, compact),
         source: "delta" as const
       };
     });

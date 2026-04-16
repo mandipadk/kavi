@@ -127,12 +127,13 @@ export function buildMissionPlayback(
     }
 
     for (const progress of artifact.progress) {
+      const semanticLabel = progress.semanticKind ? ` | ${progress.semanticKind}` : "";
       frames.push({
         id: `playback-progress-${progress.id}`,
         timestamp: progress.createdAt,
         kind: "progress",
-        title: `${artifact.title} progress`,
-        detail: progress.summary,
+        title: `${artifact.title} progress${semanticLabel}`,
+        detail: `${progress.provider ?? artifact.owner}${progress.eventName ? `:${progress.eventName}` : ""}${progress.source ? `@${progress.source}` : ""} | ${progress.summary}`,
         taskId: artifact.taskId
       });
     }

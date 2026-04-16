@@ -10,6 +10,7 @@ import type {
   KaviSnapshot,
   LandReport,
   Mission,
+  ProviderSemanticKind,
   TaskArtifact,
   TaskSpec
 } from "./types.ts";
@@ -60,6 +61,7 @@ export interface MissionObservability {
     title: string;
     summary: string;
     createdAt: string;
+    semanticKind?: ProviderSemanticKind | null;
   } | null;
   recentProgress: Array<{
     taskId: string;
@@ -69,6 +71,7 @@ export interface MissionObservability {
     createdAt: string;
     provider?: AgentName | "node" | null;
     eventName?: string | null;
+    semanticKind?: ProviderSemanticKind | null;
     source?: "notification" | "stderr" | "stdout" | "delta" | "worktree" | "hook" | "transcript" | null;
   }>;
   criticalPath: string[];
@@ -299,7 +302,8 @@ export function buildMissionObservability(
         taskId: task.id,
         title: task.title,
         summary: entry.summary,
-        createdAt: entry.createdAt
+        createdAt: entry.createdAt,
+        semanticKind: entry.semanticKind ?? null
       }];
     })
     .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0] ?? null;
@@ -313,6 +317,7 @@ export function buildMissionObservability(
         createdAt: entry.createdAt,
         provider: entry.provider ?? null,
         eventName: entry.eventName ?? null,
+        semanticKind: entry.semanticKind ?? null,
         source: entry.source ?? null
       }))
     )

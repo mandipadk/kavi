@@ -13,6 +13,9 @@ import type {
   PatternConstellation,
   PatternEntry,
   PatternTemplate,
+  PortfolioClusterInsight,
+  PortfolioCommandHabit,
+  PortfolioStartingPoint,
   SessionRecord
 } from "./types.ts";
 
@@ -262,6 +265,155 @@ function buildTemplateLinks(templates: PatternTemplate[]): Array<{
     .filter((link) => link.score > 0)
     .sort((left, right) => right.score - left.score || left.leftLabel.localeCompare(right.leftLabel))
     .slice(0, 12);
+}
+
+function buildPortfolioCommandHabits(
+  patterns: PatternEntry[],
+  repoProfiles: Array<{ repoRoot: string; label: string }>
+): PortfolioCommandHabit[] {
+  const commandMap = new Map<string, { repoRoots: Set<string>; labels: Set<string>; count: number }>();
+  const labelByRoot = new Map(repoProfiles.map((profile) => [profile.repoRoot, profile.label] as const));
+  for (const entry of patterns) {
+    for (const command of normalizePortablePatternCommands(entry.commands)) {
+      const normalized = command.trim();
+      if (!normalized) {
+        continue;
+      }
+      const existing = commandMap.get(normalized) ?? {
+        repoRoots: new Set<string>(),
+        labels: new Set<string>(),
+        count: 0
+      };
+      existing.count += 1;
+      if (entry.sourceRepoRoot) {
+        existing.repoRoots.add(entry.sourceRepoRoot);
+        existing.labels.add(labelByRoot.get(entry.sourceRepoRoot) ?? path.basename(entry.sourceRepoRoot));
+      }
+      commandMap.set(normalized, existing);
+    }
+  }
+
+  return [...commandMap.entries()]
+    .map(([command, value]) => ({
+      command,
+      count: value.count,
+      repoRoots: [...value.repoRoots].sort((left, right) => left.localeCompare(right)),
+      labels: [...value.labels].sort((left, right) => left.localeCompare(right))
+    }))
+    .sort((left, right) => right.count - left.count || left.command.localeCompare(right.command))
+    .slice(0, 16);
+}
+
+function buildPortfolioStartingPoints(
+  templates: PatternTemplate[],
+  benchmarks: PatternBenchmark[]
+): PortfolioStartingPoint[] {
+  const benchmarkByTemplateId = new Map(benchmarks.map((item) => [item.templateId, item] as const));
+  return templates
+    .filter((template) => template.kind !== "anti_pattern")
+    .map((template) => {
+      const benchmark = benchmarkByTemplateId.get(template.id);
+      const benchmarkScore = benchmark?.score ?? Math.round(template.confidence * 100);
+      const score =
+        benchmarkScore +
+        template.repoRoots.length * 3 +
+        Math.min(15, template.patternIds.length * 2) -
+        Math.min(18, template.antiPatternSignals.length * 2);
+      const reasons = unique([
+        benchmarkScore > 0 ? `benchmark:${benchmarkScore}` : "",
+        template.repoRoots.length > 1 ? `shared-by:${template.repoRoots.length}-repos` : "",
+        template.commands.length > 0 ? "portable-command-habits" : "",
+        template.acceptanceCriteria.length > 0 ? "acceptance-defaults" : "",
+        template.antiPatternSignals.length > 0 ? "anti-pattern-aware" : ""
+      ]);
+      return {
+        templateId: template.id,
+        label: template.label,
+        score,
+        benchmarkScore,
+        repoRoots: template.repoRoots,
+        stacks: template.stacks,
+        nodeKinds: template.nodeKinds,
+        commands: template.commands,
+        acceptanceCriteria: template.acceptanceCriteria,
+        antiPatternSignals: template.antiPatternSignals,
+        reasons
+      } satisfies PortfolioStartingPoint;
+    })
+    .sort((left, right) => right.score - left.score || left.label.localeCompare(right.label))
+    .slice(0, 10);
+}
+
+function buildPortfolioClusterInsights(
+  repoClusters: PatternConstellation["repoClusters"],
+  patterns: PatternEntry[],
+  templates: PatternTemplate[],
+  benchmarks: PatternBenchmark[],
+  repoProfiles: PatternConstellation["repoProfiles"]
+): PortfolioClusterInsight[] {
+  const labelByRoot = new Map(repoProfiles.map((profile) => [profile.repoRoot, profile.label] as const));
+  const benchmarkByTemplateId = new Map(benchmarks.map((item) => [item.templateId, item] as const));
+
+  return repoClusters.map((cluster) => {
+    const repoRootSet = new Set(cluster.repoRoots);
+    const clusterPatterns = patterns.filter((entry) => repoRootSet.has(entry.sourceRepoRoot));
+    const clusterTemplates = templates.filter((template) =>
+      template.repoRoots.some((repoRoot) => repoRootSet.has(repoRoot))
+    );
+    const commandHabits = buildPortfolioCommandHabits(clusterPatterns, repoProfiles).slice(0, 6);
+    const acceptanceCriteria = countValues(
+      clusterTemplates.flatMap((template) => template.acceptanceCriteria)
+    ).slice(0, 8);
+    const antiPatternHotspots = countValues(
+      clusterPatterns.flatMap((entry) => (entry.kind === "anti_pattern" ? (entry.antiPatternSignals ?? []) : []))
+    ).slice(0, 8);
+    const scoredTemplates = clusterTemplates
+      .map((template) => ({
+        template,
+        benchmarkScore: benchmarkByTemplateId.get(template.id)?.score ?? Math.round(template.confidence * 100)
+      }))
+      .sort(
+        (left, right) =>
+          right.benchmarkScore - left.benchmarkScore ||
+          right.template.patternIds.length - left.template.patternIds.length
+      );
+    const recommendedTemplates = scoredTemplates.slice(0, 3).map((item) => item.template.id);
+    const benchmarkScore =
+      scoredTemplates.length === 0
+        ? 0
+        : Math.round(
+            scoredTemplates.reduce((sum, item) => sum + item.benchmarkScore, 0) / scoredTemplates.length
+          );
+    const summaryParts = [
+      cluster.labels.length > 0 ? `Cluster spans ${cluster.labels.join(", ")}` : "",
+      cluster.stacks.length > 0 ? `Common stacks: ${cluster.stacks.join(", ")}` : "",
+      commandHabits[0] ? `Typical command habit: ${commandHabits[0].command}` : "",
+      acceptanceCriteria[0] ? `Typical acceptance: ${acceptanceCriteria[0].value}` : "",
+      antiPatternHotspots[0] ? `Watch for: ${antiPatternHotspots[0].value}` : ""
+    ].filter(Boolean);
+
+    return {
+      id: cluster.id,
+      labels: cluster.labels,
+      repoRoots: cluster.repoRoots,
+      repoCount: cluster.repoRoots.length,
+      stacks: cluster.stacks,
+      nodeKinds: cluster.nodeKinds,
+      commandHabits,
+      acceptanceCriteria,
+      antiPatternHotspots,
+      benchmarkScore,
+      templateIds: clusterTemplates.map((template) => template.id),
+      recommendedTemplateIds: recommendedTemplates,
+      summary: summaryParts.join(". "),
+      score:
+        cluster.score +
+        benchmarkScore +
+        commandHabits.length * 2 +
+        acceptanceCriteria.length -
+        antiPatternHotspots.length
+    } satisfies PortfolioClusterInsight;
+  }).sort((left, right) => right.score - left.score || left.id.localeCompare(right.id));
 }
 
 function truncate(value: string, max = 220): string {
@@ -522,7 +674,9 @@ export interface PatternStudio {
   rankedTemplates: RankedPatternTemplate[];
   selectedBenchmarks: PatternBenchmark[];
   relatedRepoClusters: PatternConstellation["repoClusters"];
+  relatedClusterInsights: PatternConstellation["clusterInsights"];
   relatedTemplateLinks: PatternConstellation["templateLinks"];
+  relatedStartingPoints: PatternConstellation["startingPoints"];
   antiPatternHotspots: PatternConstellation["antiPatternHotspots"];
   topRepos: PatternConstellation["topRepos"];
   topStacks: PatternConstellation["topStacks"];
@@ -980,6 +1134,12 @@ export async function buildPatternStudio(
   const relatedRepoClusters = constellation.repoClusters.filter((cluster) =>
     cluster.repoRoots.some((repoRoot) => selectedRepoRoots.has(repoRoot))
   );
+  const relatedClusterInsights = constellation.clusterInsights.filter((cluster) =>
+    cluster.repoRoots.some((repoRoot) => selectedRepoRoots.has(repoRoot))
+  );
+  const relatedStartingPoints = constellation.startingPoints.filter((entry) =>
+    composition.templateIds.includes(entry.templateId)
+  );
 
   return {
     prompt: prompt.trim(),
@@ -987,7 +1147,9 @@ export async function buildPatternStudio(
     rankedTemplates,
     selectedBenchmarks,
     relatedRepoClusters,
+    relatedClusterInsights,
     relatedTemplateLinks,
+    relatedStartingPoints,
     antiPatternHotspots: constellation.antiPatternHotspots,
     topRepos: constellation.topRepos,
     topStacks: constellation.topStacks
@@ -1283,6 +1445,7 @@ export async function buildPatternConstellation(paths: AppPaths): Promise<Patter
   }
 
   const templates = buildPatternTemplatesFromEntries(derivedPatterns);
+  const benchmarks = templates.length > 0 ? await buildPatternBenchmarks(paths) : [];
   const repoProfiles = countBy(patterns, (entry) => entry.sourceRepoRoot)
     .map(({ value, count }) => {
       const repoEntries = derivedPatterns.filter((entry) => entry.sourceRepoRoot === value);
@@ -1337,13 +1500,24 @@ export async function buildPatternConstellation(paths: AppPaths): Promise<Patter
     .slice(0, 12);
   const repoClusters = buildRepoClusters(repoProfiles, repoLinks);
   const templateLinks = buildTemplateLinks(templates);
+  const commandHabits = buildPortfolioCommandHabits(patterns, repoProfiles);
+  const clusterInsights = buildPortfolioClusterInsights(
+    repoClusters,
+    derivedPatterns,
+    templates,
+    benchmarks,
+    repoProfiles
+  );
+  const startingPoints = buildPortfolioStartingPoints(templates, benchmarks);
 
   return {
     totalPatterns: patterns.length,
     totalTemplates: templates.length,
     topStacks: countValues(derivedPatterns.flatMap((entry) => entry.stackSignals ?? [])).slice(0, 8),
     topNodeKinds: countValues(derivedPatterns.flatMap((entry) => entry.nodeKinds ?? [])).slice(0, 8),
-    topCommands: countValues(patterns.flatMap((entry) => entry.commands)).slice(0, 8),
+    topCommands: countValues(
+      patterns.flatMap((entry) => normalizePortablePatternCommands(entry.commands))
+    ).slice(0, 8),
     topTags: countValues(derivedPatterns.flatMap((entry) => entry.tags)).slice(0, 10),
     topRepos: countBy(patterns, (entry) => path.basename(entry.sourceRepoRoot)).slice(0, 8),
     patternFamilies: [...familyMap.entries()]
@@ -1366,6 +1540,9 @@ export async function buildPatternConstellation(paths: AppPaths): Promise<Patter
     deliveryPatterns: derivedPatterns.filter((entry) => entry.kind === "delivery").slice(0, 8),
     antiPatterns: derivedPatterns.filter((entry) => entry.kind === "anti_pattern").slice(0, 8),
     templateLinks,
+    commandHabits,
+    clusterInsights,
+    startingPoints,
     templates: templates.slice(0, 12)
   };
 }

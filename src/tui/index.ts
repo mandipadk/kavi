@@ -23,6 +23,7 @@ import {
   type TextEditorState
 } from "../editor.ts";
 import { executeLand } from "../landing.ts";
+import { renderMissionGraph, resolveMissionGraphNodes } from "../mission-graph.ts";
 import { normalizeTaskSpec, normalizeTaskSpecs } from "../normalize.ts";
 import { findOwnershipRuleConflicts } from "../ownership.ts";
 import { currentExecutionPlan, decidePlanningMode } from "../planning.ts";
@@ -2439,6 +2440,11 @@ function renderResultInspector(
     const selectedBrainGraphEntries = graphNeighborEntriesForSelection(snapshot, ui);
     const selectedBrainEvidence = selectedBrainEvidenceTargets(snapshot, ui);
     const selectedBrainEvidenceTarget = selectedBrainEvidence[ui.selectedBrainEvidenceIndex] ?? null;
+    const missionGraphNodes = resolveMissionGraphNodes(snapshot.session, mission);
+    const missionGraphLines = renderMissionGraph(missionGraphNodes, {
+      criticalPath: observability?.criticalPath ?? [],
+      nextReadyKeys: observability?.nextReadyNodes.map((node) => node.key) ?? []
+    });
     const shadowFamily = snapshot.session.missions.filter((item) =>
       item.id === mission.id ||
       item.shadowOfMissionId === mission.id ||
@@ -2510,6 +2516,7 @@ function renderResultInspector(
                 .slice(0, 3)
                 .map((dimension) => `${dimension.label} (${dimension.weight})`)
                 .join(" | ") || "-"}`,
+              `Partial merge: kavi mission merge ${preferredShadowComparison.rightMission.id} --into ${mission.id} --dry-run`,
               ...preferredShadowComparison.dimensions.slice(0, 4).map((dimension) =>
                 `${dimension.label}: ${dimension.preferred} | left=${dimension.leftValue} | right=${dimension.rightValue}`
               )
@@ -2528,6 +2535,25 @@ function renderResultInspector(
             ["Changed Paths", `${observability.changedPaths}`],
           ], innerWidth))
         : []),
+      ...(missionGraphNodes.length > 0
+        ? section(
+            "Mission Graph",
+            missionGraphLines.flatMap((line) =>
+              wrapText(line, innerWidth).map((wrapped) =>
+                toneLine(
+                  wrapped,
+                  /\[FAIL\]|\[BLKD\]/.test(line)
+                    ? "bad"
+                    : /\{critical/.test(line)
+                      ? "warn"
+                      : /\{ready/.test(line)
+                        ? "good"
+                        : "normal"
+                )
+              )
+            )
+          )
+        : []),
       ...(observability?.criticalPath.length
         ? section("Critical Path", wrapText(observability.criticalPath.join(" -> "), innerWidth))
         : []),
@@ -2542,14 +2568,20 @@ function renderResultInspector(
       ...(observability?.latestFailure
         ? section("Latest Failure", wrapText(`${observability.latestFailure.taskId} | ${observability.latestFailure.summary}`, innerWidth))
         : observability?.latestProgress
-          ? section("Latest Progress", wrapText(`${observability.latestProgress.taskId} | ${observability.latestProgress.summary}`, innerWidth))
+          ? section(
+              "Latest Progress",
+              wrapText(
+                `${observability.latestProgress.taskId} | ${observability.latestProgress.semanticKind ?? "runtime"} | ${observability.latestProgress.summary}`,
+                innerWidth
+              )
+            )
           : []),
       ...(observability?.recentProgress.length
         ? section(
             "Recent Runtime Activity",
             observability.recentProgress.flatMap((entry) =>
               wrapText(
-                `- ${entry.provider ?? entry.kind}${entry.eventName ? `:${entry.eventName}` : ""}${entry.source ? `@${entry.source}` : ""} | ${shortTime(entry.createdAt)} | ${entry.summary}`,
+                `- ${entry.provider ?? entry.kind}/${entry.semanticKind ?? "runtime"}${entry.eventName ? `:${entry.eventName}` : ""}${entry.source ? `@${entry.source}` : ""} | ${shortTime(entry.createdAt)} | ${entry.summary}`,
                 innerWidth
               )
             )

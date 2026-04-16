@@ -40,7 +40,8 @@ import {
   listWorktreeChangedPaths
 } from "./git.ts";
 import { executeLand } from "./landing.ts";
-import { arenaSortValue, compareMissionFamily, compareMissions } from "./mission-compare.ts";
+import { arenaSortValue, buildShadowMergePlan, compareMissionFamily, compareMissions } from "./mission-compare.ts";
+import { renderMissionGraph, resolveMissionGraphNodes } from "./mission-graph.ts";
 import {
   buildMissionConfidence,
   buildMissionDigest,
@@ -164,6 +165,7 @@ import type {
   ApprovalRuleDecision,
   HookEventPayload,
   KaviSnapshot,
+  QualityCourtRole,
   RecommendationKind,
   RecommendationStatus,
   SessionRecord,
@@ -210,6 +212,21 @@ function getOptionalFilter(args: string[], name: string): string | null {
   }
 
   return value;
+}
+
+function getRepeatedFilters(args: string[], name: string): string[] {
+  const values: string[] = [];
+  for (let index = 0; index < args.length; index += 1) {
+    if (args[index] !== name) {
+      continue;
+    }
+    const value = args[index + 1] ?? null;
+    if (!value || value.startsWith("--")) {
+      continue;
+    }
+    values.push(value);
+  }
+  return values;
 }
 
 async function buildBlueprintPreviewSession(cwd: string): Promise<{
@@ -404,6 +421,21 @@ function parseBrainGraphMode(
   return "all";
 }
 
+function parseQualityCourtRole(value: string | null): QualityCourtRole | null {
+  if (!value) {
+    return null;
+  }
+  if (
+    value === "verifier" ||
+    value === "contract_auditor" ||
+    value === "integration_auditor" ||
+    value === "risk_auditor"
+  ) {
+    return value;
+  }
+  throw new Error("--role must be one of: verifier, contract_auditor, integration_auditor, risk_auditor.");
+}
+
 async function readStdinText(): Promise<string> {
   if (process.stdin.isTTY) {
     return "";
@@ -466,6 +498,7 @@ function renderUsage(): string {
     "  kavi mission compare <left-mission-id|latest> <right-mission-id> [--json]",
     "  kavi mission compare --family <mission-id|latest> [--by score|acceptance|health|risk|overlap|cost] [--json]",
     "  kavi mission arena [mission-id|latest] [--by score|acceptance|health|risk|overlap|cost] [--json]",
+    "  kavi mission merge <source-mission-id> [--into <target-mission-id|latest>] [--path FILE]... [--prefix DIR]... [--dry-run] [--json]",
     "  kavi mission select <mission-id|latest> [--json]",
     "  kavi mission policy <mission-id|latest> [--guided|--autonomous|--overnight|--inspect] [--autopilot on|off] [--auto-verify on|off] [--auto-land on|off] [--pause-on-repair-failure on|off] [--retry-budget N] [--attention-budget N] [--escalation strict|balanced|aggressive] [--json]",
     "  kavi missions [--json]",
@@ -474,9 +507,9 @@ function renderUsage(): string {
     "  kavi contract-resolve <contract-id> [--task <task-id>] [--json]",
     "  kavi contract-dismiss <contract-id> [--json]",
     "  kavi receipts [mission-id|latest] [--timeline] [--json]",
-    "  kavi judge [mission-id|latest] [--json]",
-    "  kavi audit [mission-id|latest] [--json]",
-    "  kavi objections [mission-id|latest] [--json]",
+    "  kavi judge [mission-id|latest] [--role verifier|contract_auditor|integration_auditor|risk_auditor] [--json]",
+    "  kavi audit [mission-id|latest] [--role verifier|contract_auditor|integration_auditor|risk_auditor] [--json]",
+    "  kavi objections [mission-id|latest] [--role verifier|contract_auditor|integration_auditor|risk_auditor] [--json]",
     "  kavi postmortem [mission-id|latest] [--json]",
     "  kavi playback [mission-id|latest] [--phase all|spec|execution|repair|contracts|acceptance|landing|audit] [--json]",
     "  kavi accept [mission-id|latest] [--json]",
@@ -1138,6 +1171,7 @@ async function appendClaudeHookProgress(
       lastEntry.kind === "provider" &&
       lastEntry.summary === runtimeEvent.summary &&
       lastEntry.eventName === runtimeEvent.eventName &&
+      (lastEntry.semanticKind ?? null) === runtimeEvent.semanticKind &&
       (lastEntry.source ?? null) === runtimeEvent.source &&
       lastEntry.paths.join("\n") === pathsSignature
     ) {
@@ -1152,6 +1186,7 @@ async function appendClaudeHookProgress(
       createdAt: timestamp,
       provider: runtimeEvent.provider,
       eventName: runtimeEvent.eventName,
+      semanticKind: runtimeEvent.semanticKind,
       source: runtimeEvent.source
     });
     appended = true;
@@ -1170,6 +1205,7 @@ async function appendClaudeHookProgress(
       summary: runtimeEvent.summary,
       provider: runtimeEvent.provider,
       eventName: runtimeEvent.eventName,
+      semanticKind: runtimeEvent.semanticKind,
       source: runtimeEvent.source
     });
   }
@@ -2306,7 +2342,11 @@ async function commandMission(cwd: string, args: string[]): Promise<void> {
       missionId: mission.id,
       title: mission.title,
       phase: mission.phase ?? "executing",
-      simulation: mission.simulation ?? null
+      simulation: mission.simulation ?? null,
+      graph: {
+        nodes: resolveMissionGraphNodes(session, mission),
+        lines: renderMissionGraph(resolveMissionGraphNodes(session, mission))
+      }
     };
     if (args.includes("--json")) {
       console.log(JSON.stringify(payload, null, 2));
@@ -2323,6 +2363,25 @@ async function commandMission(cwd: string, args: string[]): Promise<void> {
     console.log(`Estimated parallelism: ${mission.simulation?.estimatedParallelism ?? 1}`);
     console.log(`Verification coverage: ${mission.simulation?.verificationCoverage ?? "-"}`);
     console.log(`Contract coverage: ${mission.simulation?.contractCoverage ?? "-"}`);
+    const simulationGraphNodes = resolveMissionGraphNodes(session, mission);
+    if (simulationGraphNodes.length > 0) {
+      console.log("Mission graph:");
+      for (const line of renderMissionGraph(simulationGraphNodes, {
+        criticalPath: buildMissionObservability(
+          {
+            session,
+            approvals: [],
+            events: [],
+            worktreeDiffs: [],
+            latestLandReport: null
+          },
+          await listTaskArtifacts(paths),
+          mission
+        )?.criticalPath ?? []
+      })) {
+        console.log(`  ${line}`);
+      }
+    }
     if ((mission.simulation?.escalationReasons ?? []).length > 0) {
       console.log("Escalation reasons:");
       for (const reason of mission.simulation?.escalationReasons ?? []) {
@@ -2571,6 +2630,124 @@ async function commandMission(cwd: string, args: string[]): Promise<void> {
     if (mission.shadowOfMissionId) {
       console.log(`Shadow of: ${mission.shadowOfMissionId}`);
     }
+    return;
+  }
+
+  if (args[0] === "merge") {
+    const { paths } = await requireSession(cwd);
+    const rpcSnapshot = await tryRpcSnapshot(paths);
+    const session = rpcSnapshot?.session ?? (await loadSessionRecord(paths));
+    syncMissionStates(session);
+    const artifacts = await listTaskArtifacts(paths);
+    const missionCandidates = session.missions
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+      .map((mission) => mission.id);
+    const sourceArg = args.find((arg, index) => index > 0 && !arg.startsWith("--") && args[index - 1] !== "--into") ?? null;
+    if (!sourceArg) {
+      throw new Error("mission merge requires <source-mission-id>.");
+    }
+    const sourceMissionId = resolveRequestedMissionId([sourceArg], missionCandidates);
+    const targetMissionId = resolveRequestedMissionId(
+      [getOptionalFilter(args, "--into") ?? session.selectedMissionId ?? "latest"],
+      missionCandidates
+    );
+    const sourceMission = session.missions.find((item) => item.id === sourceMissionId) ?? null;
+    const targetMission = session.missions.find((item) => item.id === targetMissionId) ?? null;
+    if (!sourceMission || !targetMission) {
+      throw new Error("The source or target mission for merge could not be found.");
+    }
+    if (sourceMission.id === targetMission.id) {
+      throw new Error("mission merge requires a different source and target mission.");
+    }
+    const snapshot = {
+      session,
+      approvals: [],
+      events: [],
+      worktreeDiffs: [],
+      latestLandReport: null
+    };
+    const mergePlan = buildShadowMergePlan(snapshot, targetMission, sourceMission, artifacts, {
+      includePaths: getRepeatedFilters(args, "--path"),
+      includePrefixes: getRepeatedFilters(args, "--prefix")
+    });
+    const payload = {
+      targetMissionId: targetMission.id,
+      sourceMissionId: sourceMission.id,
+      selectedPaths: mergePlan.selectedPaths,
+      overlapPaths: mergePlan.overlapPaths,
+      sourceOnlyPaths: mergePlan.sourceOnlyPaths,
+      targetOnlyPaths: mergePlan.targetOnlyPaths,
+      sourceTasks: mergePlan.sourceTasks,
+      recommendedOwner: mergePlan.recommendedOwner,
+      summary: mergePlan.summary
+    };
+    if (hasFlag(args, "--dry-run")) {
+      if (args.includes("--json")) {
+        console.log(JSON.stringify(payload, null, 2));
+        return;
+      }
+      console.log(`Shadow merge plan: ${sourceMission.id} -> ${targetMission.id}`);
+      console.log(`Owner: ${mergePlan.recommendedOwner}`);
+      console.log(`Paths: ${mergePlan.selectedPaths.join(", ") || "-"}`);
+      console.log(`Source tasks: ${mergePlan.sourceTasks.map((task) => `${task.owner}:${task.title}`).join(" | ") || "-"}`);
+      console.log(mergePlan.summary);
+      return;
+    }
+    if (mergePlan.selectedPaths.length === 0) {
+      throw new Error(`No mergeable paths were selected from ${sourceMission.id}. Use --path or --prefix to choose a slice explicitly.`);
+    }
+
+    const mergePrompt = [
+      `Integrate a selected shadow strategy slice from mission ${sourceMission.id} into mission ${targetMission.id}.`,
+      `Target mission: ${targetMission.title}`,
+      `Source mission: ${sourceMission.title}`,
+      `Selected paths: ${mergePlan.selectedPaths.join(", ")}`,
+      mergePlan.overlapPaths.length > 0 ? `Overlapping paths to reconcile carefully: ${mergePlan.overlapPaths.join(", ")}` : null,
+      mergePlan.sourceOnlyPaths.length > 0 ? `Source-only paths available: ${mergePlan.sourceOnlyPaths.join(", ")}` : null,
+      mergePlan.sourceTasks.length > 0
+        ? `Source task evidence: ${mergePlan.sourceTasks.map((task) => `${task.owner}/${task.nodeKind ?? "task"}:${task.title}`).join(" | ")}`
+        : null,
+      "Do a partial merge only for the selected slice. Preserve the target mission intent outside those paths and return a clear integration summary."
+    ].filter(Boolean).join("\n");
+
+    await ensureMutableActionAllowed(paths, session, "Queueing a shadow partial merge");
+    const enqueuePayload = {
+      owner: mergePlan.recommendedOwner,
+      title: `Merge shadow slice from ${sourceMission.id}`,
+      prompt: mergePrompt,
+      routeReason: mergePlan.summary,
+      routeMetadata: {
+        source: "shadow-partial-merge",
+        sourceMissionId: sourceMission.id,
+        targetMissionId: targetMission.id,
+        selectedPaths: mergePlan.selectedPaths
+      },
+      claimedPaths: mergePlan.selectedPaths,
+      routeStrategy: "manual" as const,
+      routeConfidence: 1,
+      missionId: targetMission.id,
+      planningMode: "direct" as const
+    };
+    if (rpcSnapshot) {
+      await rpcEnqueueTask(paths, enqueuePayload);
+    } else {
+      await appendCommand(paths, "enqueue", enqueuePayload);
+    }
+    await recordEvent(paths, session.id, "mission.shadow_merge_queued", {
+      sourceMissionId: sourceMission.id,
+      targetMissionId: targetMission.id,
+      selectedPaths: mergePlan.selectedPaths,
+      owner: mergePlan.recommendedOwner
+    });
+    if (args.includes("--json")) {
+      console.log(JSON.stringify({
+        ...payload,
+        queued: true
+      }, null, 2));
+      return;
+    }
+    console.log(`Queued shadow partial merge from ${sourceMission.id} into ${targetMission.id} via ${mergePlan.recommendedOwner}.`);
+    console.log(`Paths: ${mergePlan.selectedPaths.join(", ")}`);
     return;
   }
 
@@ -2849,10 +3026,18 @@ async function commandMission(cwd: string, args: string[]): Promise<void> {
   );
 
   if (args.includes("--json")) {
+    const graphNodes = resolveMissionGraphNodes(session, mission);
     console.log(JSON.stringify({
       ...mission,
       selected: session.selectedMissionId === mission.id,
       observability,
+      graph: {
+        nodes: graphNodes,
+        lines: renderMissionGraph(graphNodes, {
+          criticalPath: observability?.criticalPath ?? [],
+          nextReadyKeys: observability?.nextReadyNodes.map((node) => node.key) ?? []
+        })
+      },
       acceptanceExplanations: explainMissionAcceptanceFailures(mission)
     }, null, 2));
     return;
@@ -2913,6 +3098,16 @@ async function commandMission(cwd: string, args: string[]): Promise<void> {
     console.log(`  ui surfaces: ${mission.blueprint.uiSurfaces.join(", ") || "-"}`);
     console.log(`  journeys: ${mission.blueprint.acceptanceJourneys.join(" | ") || "-"}`);
     console.log(`  architecture notes: ${mission.blueprint.architectureNotes.join(" | ") || "-"}`);
+  }
+  const graphNodes = resolveMissionGraphNodes(session, mission);
+  if (graphNodes.length > 0) {
+    console.log("Mission graph:");
+    for (const line of renderMissionGraph(graphNodes, {
+      criticalPath: observability?.criticalPath ?? [],
+      nextReadyKeys: observability?.nextReadyNodes.map((node) => node.key) ?? []
+    })) {
+      console.log(`  ${line}`);
+    }
   }
   console.log("Criteria:");
   for (const criterion of mission.acceptance.criteria) {
@@ -2983,12 +3178,16 @@ async function commandMission(cwd: string, args: string[]): Promise<void> {
       console.log(`Latest failure: ${observability.latestFailure.taskId} | ${observability.latestFailure.summary}`);
     }
     if (observability.latestProgress) {
-      console.log(`Latest progress: ${observability.latestProgress.taskId} | ${observability.latestProgress.summary}`);
+      console.log(
+        `Latest progress: ${observability.latestProgress.taskId} | ${observability.latestProgress.semanticKind ?? "runtime"} | ${observability.latestProgress.summary}`
+      );
     }
     if (observability.recentProgress.length > 0) {
       console.log("Recent runtime activity:");
       for (const entry of observability.recentProgress.slice(0, 5)) {
-        console.log(`- ${entry.kind} | ${entry.taskId} | ${entry.summary}`);
+        console.log(
+          `- ${entry.kind}/${entry.semanticKind ?? "runtime"} | ${entry.taskId} | ${entry.summary}`
+        );
       }
     }
   }
@@ -3344,8 +3543,15 @@ async function commandJudgeFamily(cwd: string, args: string[], mode: "judge" | "
   const session = await loadSessionRecord(paths);
   syncMissionStates(session);
   const artifacts = await listTaskArtifacts(paths);
+  const role = parseQualityCourtRole(getOptionalFilter(args, "--role"));
+  const positionalArgs = args.filter((arg, index) => {
+    if (arg.startsWith("--")) {
+      return false;
+    }
+    return args[index - 1] !== "--role";
+  });
   const missionId = resolveRequestedMissionId(
-    [args.find((arg) => !arg.startsWith("--")) ?? "latest"],
+    [positionalArgs[0] ?? "latest"],
     session.missions
       .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
       .map((mission) => mission.id)
@@ -3359,15 +3565,16 @@ async function commandJudgeFamily(cwd: string, args: string[], mode: "judge" | "
   if (!audit) {
     throw new Error(`Mission ${mission.id} could not be audited.`);
   }
+  const selectedRoleReport = role ? audit.roleReports.find((item) => item.role === role) ?? null : null;
   if (mode === "objections") {
-    const objections = buildMissionObjections(session, mission, artifacts);
+    const objections = buildMissionObjections(session, mission, artifacts, role);
     if (args.includes("--json")) {
       console.log(JSON.stringify(objections, null, 2));
       return;
     }
-    console.log(`Mission objections: ${mission.id}`);
+    console.log(`Mission objections: ${mission.id}${role ? ` | role=${role}` : ""}`);
     for (const objection of objections) {
-      console.log(`- [${objection.severity}] ${objection.title}`);
+      console.log(`- [${objection.role}/${objection.severity}] ${objection.title}`);
       console.log(`  ${objection.detail}`);
       if (objection.suggestedAction) {
         console.log(`  action: ${objection.suggestedAction}`);
@@ -3380,36 +3587,58 @@ async function commandJudgeFamily(cwd: string, args: string[], mode: "judge" | "
   }
 
   if (args.includes("--json")) {
-    console.log(JSON.stringify(audit, null, 2));
+    console.log(JSON.stringify(role && selectedRoleReport ? selectedRoleReport : audit, null, 2));
     if (mode === "judge") {
-      process.exitCode = audit.verdict === "blocked" ? 1 : 0;
+      process.exitCode = (selectedRoleReport?.verdict ?? audit.verdict) === "blocked" ? 1 : 0;
     }
     return;
   }
 
-  console.log(`Mission ${mode}: ${mission.id}`);
-  console.log(`Verdict: ${audit.verdict} | score=${audit.score}`);
-  console.log(`Summary: ${audit.summary}`);
-  console.log("Approvals:");
-  for (const item of audit.approvals) {
-    console.log(`- ${item}`);
-  }
-  if (audit.approvals.length === 0) {
-    console.log("- none");
-  }
-  console.log("Objections:");
-  for (const objection of audit.objections) {
-    console.log(`- [${objection.severity}] ${objection.title}`);
-    console.log(`  ${objection.detail}`);
-    if (objection.evidence.length > 0) {
-      console.log(`  evidence: ${objection.evidence.join(" | ")}`);
+  const renderRoleReport = (label: string, report: { verdict: string; score: number; summary: string; approvals: string[]; objections: typeof audit.objections; }) => {
+    console.log(`${label}`);
+    console.log(`Verdict: ${report.verdict} | score=${report.score}`);
+    console.log(`Summary: ${report.summary}`);
+    console.log("Approvals:");
+    for (const item of report.approvals) {
+      console.log(`- ${item}`);
     }
-    if (objection.suggestedAction) {
-      console.log(`  action: ${objection.suggestedAction}`);
+    if (report.approvals.length === 0) {
+      console.log("- none");
     }
+    console.log("Objections:");
+    for (const objection of report.objections) {
+      console.log(`- [${objection.role}/${objection.severity}] ${objection.title}`);
+      console.log(`  ${objection.detail}`);
+      if (objection.evidence.length > 0) {
+        console.log(`  evidence: ${objection.evidence.join(" | ")}`);
+      }
+      if (objection.suggestedAction) {
+        console.log(`  action: ${objection.suggestedAction}`);
+      }
+    }
+    if (report.objections.length === 0) {
+      console.log("- none");
+    }
+  };
+
+  if (role && selectedRoleReport) {
+    renderRoleReport(`Mission ${mode}: ${mission.id} | role=${role}`, selectedRoleReport);
+    if (mode === "judge") {
+      process.exitCode = selectedRoleReport.verdict === "blocked" ? 1 : 0;
+    }
+    return;
   }
-  if (audit.objections.length === 0) {
-    console.log("- none");
+
+  renderRoleReport(`Mission ${mode}: ${mission.id}`, audit);
+  if (audit.roleReports.length > 0) {
+    console.log("Role breakdown:");
+    for (const report of audit.roleReports) {
+      console.log(`- ${report.role} | verdict=${report.verdict} | score=${report.score}`);
+      if (report.objections[0]) {
+        console.log(`  top objection: ${report.objections[0].title}`);
+      }
+    }
+    console.log(`Dominant roles: ${audit.dominantRoles.join(", ") || "-"}`);
   }
   if (mode === "judge") {
     process.exitCode = audit.verdict === "blocked" ? 1 : 0;
@@ -4111,6 +4340,17 @@ async function commandPatterns(cwd: string, args: string[]): Promise<void> {
         console.log(`  nodes: ${cluster.nodeKinds.join(", ") || "-"}`);
       }
     }
+    if (payload.clusterInsights.length > 0) {
+      console.log("Cluster insights:");
+      for (const cluster of payload.clusterInsights.slice(0, 6)) {
+        console.log(`- ${cluster.labels.join(" + ")} | benchmark=${cluster.benchmarkScore} | score=${cluster.score}`);
+        console.log(`  summary: ${cluster.summary || "-"}`);
+        console.log(`  commands: ${cluster.commandHabits.map((item) => `${item.command} (${item.count})`).join(" | ") || "-"}`);
+        console.log(`  acceptance: ${cluster.acceptanceCriteria.map((item) => `${item.value} (${item.count})`).join(" | ") || "-"}`);
+        console.log(`  anti-patterns: ${cluster.antiPatternHotspots.map((item) => `${item.value} (${item.count})`).join(" | ") || "-"}`);
+        console.log(`  recommended templates: ${cluster.recommendedTemplateIds.join(", ") || "-"}`);
+      }
+    }
     if (payload.templates.length > 0) {
       console.log("Portfolio templates:");
       for (const template of payload.templates.slice(0, 6)) {
@@ -4124,6 +4364,22 @@ async function commandPatterns(cwd: string, args: string[]): Promise<void> {
         console.log(`  stacks: ${link.sharedStacks.join(", ") || "-"}`);
         console.log(`  nodes: ${link.sharedNodeKinds.join(", ") || "-"}`);
         console.log(`  acceptance: ${link.sharedAcceptance.join(" | ") || "-"}`);
+      }
+    }
+    if (payload.commandHabits.length > 0) {
+      console.log("Command habits:");
+      for (const habit of payload.commandHabits.slice(0, 8)) {
+        console.log(`- ${habit.command} (${habit.count})`);
+        console.log(`  repos: ${habit.labels.join(", ") || "-"}`);
+      }
+    }
+    if (payload.startingPoints.length > 0) {
+      console.log("Starting points:");
+      for (const entry of payload.startingPoints.slice(0, 6)) {
+        console.log(`- ${entry.label} | score=${entry.score} | benchmark=${entry.benchmarkScore}`);
+        console.log(`  reasons: ${entry.reasons.join(", ") || "-"}`);
+        console.log(`  stacks: ${entry.stacks.join(", ") || "-"}`);
+        console.log(`  nodes: ${entry.nodeKinds.join(", ") || "-"}`);
       }
     }
     if (payload.antiPatternHotspots.length > 0) {
@@ -4255,11 +4511,26 @@ async function commandPatterns(cwd: string, args: string[]): Promise<void> {
         console.log(`  stacks: ${cluster.stacks.join(", ") || "-"}`);
       }
     }
+    if (payload.relatedClusterInsights.length > 0) {
+      console.log("Related cluster insights:");
+      for (const cluster of payload.relatedClusterInsights.slice(0, 6)) {
+        console.log(`- ${cluster.labels.join(" + ")} | benchmark=${cluster.benchmarkScore} | score=${cluster.score}`);
+        console.log(`  summary: ${cluster.summary || "-"}`);
+        console.log(`  commands: ${cluster.commandHabits.map((item) => `${item.command} (${item.count})`).join(" | ") || "-"}`);
+      }
+    }
     if (payload.relatedTemplateLinks.length > 0) {
       console.log("Related template links:");
       for (const link of payload.relatedTemplateLinks.slice(0, 6)) {
         console.log(`- ${link.leftLabel} <-> ${link.rightLabel} | score=${link.score}`);
         console.log(`  acceptance: ${link.sharedAcceptance.join(" | ") || "-"}`);
+      }
+    }
+    if (payload.relatedStartingPoints.length > 0) {
+      console.log("Related starting points:");
+      for (const entry of payload.relatedStartingPoints.slice(0, 6)) {
+        console.log(`- ${entry.label} | score=${entry.score}`);
+        console.log(`  reasons: ${entry.reasons.join(", ") || "-"}`);
       }
     }
     console.log(`Top portfolio repos: ${payload.topRepos.map((item) => `${item.value} (${item.count})`).join(", ") || "-"}`);
@@ -4461,7 +4732,10 @@ async function commandPortfolio(cwd: string, args: string[]): Promise<void> {
     repos: payload.repoProfiles,
     links: payload.repoLinks,
     clusters: payload.repoClusters,
+    clusterInsights: payload.clusterInsights,
     templateLinks: payload.templateLinks,
+    commandHabits: payload.commandHabits,
+    startingPoints: payload.startingPoints,
     benchmarks: await buildPatternBenchmarks(paths)
   };
 
@@ -4473,7 +4747,10 @@ async function commandPortfolio(cwd: string, args: string[]): Promise<void> {
   console.log(`Portfolio repos: ${graph.repos.length}`);
   console.log(`Repo links: ${graph.links.length}`);
   console.log(`Repo clusters: ${graph.clusters.length}`);
+  console.log(`Cluster insights: ${graph.clusterInsights.length}`);
   console.log(`Template links: ${graph.templateLinks.length}`);
+  console.log(`Command habits: ${graph.commandHabits.length}`);
+  console.log(`Starting points: ${graph.startingPoints.length}`);
   console.log(`Benchmarks: ${graph.benchmarks.length}`);
   if (graph.clusters.length > 0) {
     console.log("Clusters:");
@@ -4481,6 +4758,31 @@ async function commandPortfolio(cwd: string, args: string[]): Promise<void> {
       console.log(`- ${cluster.labels.join(" + ")} | score=${cluster.score}`);
       console.log(`  stacks: ${cluster.stacks.join(", ") || "-"}`);
       console.log(`  nodes: ${cluster.nodeKinds.join(", ") || "-"}`);
+    }
+  }
+  if (graph.clusterInsights.length > 0) {
+    console.log("Cluster insights:");
+    for (const cluster of graph.clusterInsights.slice(0, 8)) {
+      console.log(`- ${cluster.labels.join(" + ")} | benchmark=${cluster.benchmarkScore} | score=${cluster.score}`);
+      console.log(`  summary: ${cluster.summary || "-"}`);
+      console.log(`  commands: ${cluster.commandHabits.map((item) => `${item.command} (${item.count})`).join(" | ") || "-"}`);
+      console.log(`  acceptance: ${cluster.acceptanceCriteria.map((item) => `${item.value} (${item.count})`).join(" | ") || "-"}`);
+    }
+  }
+  if (graph.commandHabits.length > 0) {
+    console.log("Command habits:");
+    for (const habit of graph.commandHabits.slice(0, 8)) {
+      console.log(`- ${habit.command} (${habit.count})`);
+      console.log(`  repos: ${habit.labels.join(", ") || "-"}`);
+    }
+  }
+  if (graph.startingPoints.length > 0) {
+    console.log("Starting points:");
+    for (const entry of graph.startingPoints.slice(0, 8)) {
+      console.log(`- ${entry.label} | score=${entry.score} | benchmark=${entry.benchmarkScore}`);
+      console.log(`  reasons: ${entry.reasons.join(", ") || "-"}`);
+      console.log(`  repos: ${entry.repoRoots.map((root) => path.basename(root)).join(", ") || "-"}`);
+      console.log(`  commands: ${entry.commands.join(" | ") || "-"}`);
     }
   }
   if (graph.benchmarks.length > 0) {
@@ -5317,9 +5619,16 @@ async function commandTaskOutput(cwd: string, args: string[]): Promise<void> {
     console.log("-");
   } else {
     for (const entry of artifact.progress.slice(-10)) {
-      console.log(`${entry.createdAt} | ${entry.kind} | ${entry.summary}`);
+      console.log(
+        `${entry.createdAt} | ${entry.kind}/${entry.semanticKind ?? "runtime"} | ${entry.summary}`
+      );
       if (entry.paths.length > 0) {
         console.log(`  paths: ${entry.paths.join(", ")}`);
+      }
+      if (entry.provider || entry.eventName || entry.source) {
+        console.log(
+          `  runtime: provider=${entry.provider ?? "-"} event=${entry.eventName ?? "-"} source=${entry.source ?? "-"}`
+        );
       }
     }
   }

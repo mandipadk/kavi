@@ -1,5 +1,5 @@
 import { buildMissionObservability } from "./workflow.ts";
-import type { KaviSnapshot, Mission, TaskArtifact } from "./types.ts";
+import type { AgentName, KaviSnapshot, Mission, TaskArtifact } from "./types.ts";
 
 export type MissionArenaSort = "score" | "acceptance" | "health" | "risk" | "overlap" | "cost";
 
@@ -39,6 +39,30 @@ export interface MissionComparisonResult {
   leftAcceptanceFailures: string[];
   rightAcceptanceFailures: string[];
   recommendation: string;
+}
+
+export interface ShadowMergeTaskSource {
+  taskId: string;
+  title: string;
+  owner: AgentName;
+  nodeKind: string | null;
+  claimedPaths: string[];
+}
+
+export interface ShadowMergePlan {
+  targetMission: Mission;
+  sourceMission: Mission;
+  selectedPaths: string[];
+  overlapPaths: string[];
+  targetOnlyPaths: string[];
+  sourceOnlyPaths: string[];
+  sourceTasks: ShadowMergeTaskSource[];
+  recommendedOwner: AgentName;
+  summary: string;
+}
+
+function unique<T>(values: T[]): T[] {
+  return [...new Set(values)];
 }
 
 export function relatedMissionFamily(snapshot: KaviSnapshot, mission: Mission): Mission[] {
@@ -178,6 +202,21 @@ function summarizeAcceptanceFailures(mission: Mission): string[] {
   return mission.acceptance.checks
     .filter((check) => check.status === "failed")
     .map((check) => `${check.title}${check.path ? ` [${check.path}]` : ""}`);
+}
+
+function pathsOverlap(left: string, right: string): boolean {
+  return left === right || left.startsWith(`${right}/`) || right.startsWith(`${left}/`);
+}
+
+function ownerFromPaths(paths: string[]): AgentName {
+  const claudeScore = paths.reduce((total, filePath) => {
+    return total + (
+      /(^|\/)(web|ui|app|pages?|components?|styles?)(\/|$)|\.(tsx|jsx|css|scss|html|mdx?)$/i.test(filePath)
+        ? 1
+        : 0
+    );
+  }, 0);
+  return claudeScore > 0 ? "claude" : "codex";
 }
 
 export function compareMissions(
@@ -420,4 +459,77 @@ export function arenaSortValue(
     default:
       return result.rightScore - result.leftScore;
   }
+}
+
+export function buildShadowMergePlan(
+  snapshot: KaviSnapshot,
+  targetMission: Mission,
+  sourceMission: Mission,
+  artifacts: TaskArtifact[] = [],
+  options: {
+    includePaths?: string[];
+    includePrefixes?: string[];
+  } = {}
+): ShadowMergePlan {
+  const comparison = compareMissions(snapshot, targetMission, sourceMission, artifacts);
+  const sourcePaths = unique([
+    ...(comparison.rightObservability?.changedPathList ?? []),
+    ...comparison.rightOnlyPaths,
+    ...comparison.changedPathOverlap
+  ]).sort((left, right) => left.localeCompare(right));
+  const includePaths = unique((options.includePaths ?? []).map((item) => item.trim()).filter(Boolean));
+  const includePrefixes = unique((options.includePrefixes ?? []).map((item) => item.trim()).filter(Boolean));
+  const selectedPaths =
+    includePaths.length > 0 || includePrefixes.length > 0
+      ? sourcePaths.filter((candidate) =>
+          includePaths.some((path) => pathsOverlap(candidate, path)) ||
+          includePrefixes.some((prefix) => candidate === prefix || candidate.startsWith(`${prefix}/`))
+        )
+      : comparison.rightOnlyPaths.length > 0
+        ? [...comparison.rightOnlyPaths]
+        : [...comparison.changedPathOverlap];
+  const sourceTasks = snapshot.session.tasks
+    .filter((task) => task.missionId === sourceMission.id)
+    .filter((task) => task.owner === "codex" || task.owner === "claude")
+    .filter((task) =>
+      task.claimedPaths.some((claimedPath) => selectedPaths.some((selectedPath) => pathsOverlap(claimedPath, selectedPath)))
+    )
+    .map((task) => ({
+      taskId: task.id,
+      title: task.title,
+      owner: task.owner,
+      nodeKind: task.nodeKind,
+      claimedPaths: task.claimedPaths.filter((claimedPath) =>
+        selectedPaths.some((selectedPath) => pathsOverlap(claimedPath, selectedPath))
+      )
+    }));
+  const ownerScores = sourceTasks.reduce<Record<AgentName, number>>(
+    (scores, task) => ({
+      ...scores,
+      [task.owner]: (scores[task.owner] ?? 0) + Math.max(1, task.claimedPaths.length)
+    }),
+    { codex: 0, claude: 0 }
+  );
+  const recommendedOwner =
+    ownerScores.codex === ownerScores.claude
+      ? ownerFromPaths(selectedPaths)
+      : ownerScores.claude > ownerScores.codex
+        ? "claude"
+        : "codex";
+  const summary =
+    selectedPaths.length > 0
+      ? `Integrate ${selectedPaths.length} selected shadow path(s) from ${sourceMission.id} into ${targetMission.id}.`
+      : `No eligible shadow paths were selected from ${sourceMission.id}.`;
+
+  return {
+    targetMission,
+    sourceMission,
+    selectedPaths,
+    overlapPaths: comparison.changedPathOverlap.filter((filePath) => selectedPaths.includes(filePath)),
+    targetOnlyPaths: comparison.leftOnlyPaths,
+    sourceOnlyPaths: comparison.rightOnlyPaths,
+    sourceTasks,
+    recommendedOwner,
+    summary
+  };
 }

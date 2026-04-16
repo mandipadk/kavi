@@ -133,6 +133,28 @@ function normalizeArtifact(artifact: TaskArtifact): TaskArtifact {
               ? entry.provider
               : null,
           eventName: typeof entry.eventName === "string" ? entry.eventName : null,
+          semanticKind:
+            entry.semanticKind === "planning" ||
+            entry.semanticKind === "reasoning" ||
+            entry.semanticKind === "inspection" ||
+            entry.semanticKind === "scaffold" ||
+            entry.semanticKind === "editing" ||
+            entry.semanticKind === "command" ||
+            entry.semanticKind === "verification" ||
+            entry.semanticKind === "blocker" ||
+            entry.semanticKind === "approval" ||
+            entry.semanticKind === "handoff" ||
+            entry.semanticKind === "contract" ||
+            entry.semanticKind === "review" ||
+            entry.semanticKind === "tool" ||
+            entry.semanticKind === "session" ||
+            entry.semanticKind === "notification" ||
+            entry.semanticKind === "runtime" ||
+            entry.semanticKind === "failure" ||
+            entry.semanticKind === "completion" ||
+            entry.semanticKind === "artifact"
+              ? entry.semanticKind
+              : null,
           source:
             entry.source === "notification" ||
             entry.source === "stderr" ||
