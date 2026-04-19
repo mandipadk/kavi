@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { defaultConfig } from "./config.ts";
 import {
+  buildMissionAttentionPacket,
   buildMissionConfidence,
   buildMissionDigest,
   buildMissionMorningBrief,
@@ -406,6 +407,7 @@ test("buildMissionDigest includes receipts, contracts, repairs, and recovery sta
   assert.equal(digest?.openContracts.length, 1);
   assert.equal(digest?.activeRepairPlans.length, 1);
   assert.equal(digest?.failurePacks.length, 1);
+  assert.ok(digest?.attentionPacket.items.some((item) => item.kind === "repair"));
   assert.ok(digest?.recoveryPlan.actions.some((action) => action.kind === "review_repairs"));
 });
 
@@ -494,5 +496,78 @@ test("buildMissionMorningBrief summarizes overnight progress and first actions",
   assert.ok(brief?.headline.includes("completed"));
   assert.equal(brief?.completedTasks.length, 1);
   assert.equal(brief?.openContracts.length, 1);
-  assert.ok(brief?.firstActions.some((action) => /contracts/i.test(action)));
+  assert.ok((brief?.attentionPacket.items.length ?? 0) >= 1);
+  assert.ok(brief?.firstActions.length);
+  assert.ok(brief?.firstActions.some((action) => /verify|contract|review/i.test(action)));
+});
+
+test("buildMissionAttentionPacket ranks operator attention across providers, contracts, and follow-ups", () => {
+  const session = buildSession();
+  const mission = createMissionForSession(session, "Ship a clinic dashboard with contracts and verification.");
+  session.providerCapabilities.push({
+    provider: "claude",
+    version: "1.0.0",
+    transport: "claude-print",
+    status: "degraded",
+    capabilities: ["print"],
+    warnings: [],
+    errors: ["Authentication required."],
+    checkedAt: "2026-04-10T00:02:00.000Z"
+  });
+  session.contracts?.push({
+    id: "contract-blocking",
+    missionId: mission.id,
+    sourceTaskId: "task-api",
+    sourceMessageId: null,
+    sourceAgent: "codex",
+    targetAgent: "claude",
+    kind: "request_refinement",
+    status: "open",
+    title: "Refine dashboard shell",
+    detail: "Frontend pass is required before verification.",
+    requiredArtifacts: ["apps/web/app/page.tsx"],
+    acceptanceExpectations: ["Dashboard shell renders the clinic view."],
+    urgency: "high",
+    dependencyImpact: "blocking",
+    claimedPaths: ["apps/web/app/page.tsx"],
+    createdAt: "2026-04-10T00:02:00.000Z",
+    updatedAt: "2026-04-10T00:02:00.000Z",
+    resolvedAt: null,
+    resolvedByTaskId: null
+  });
+  session.recommendationStates.push({
+    recommendationId: "rec-followup",
+    status: "active",
+    dismissReason: null,
+    dismissedAt: null,
+    lastAppliedTaskId: null
+  });
+  session.tasks.push(buildTask({
+    id: "task-api",
+    missionId: mission.id,
+    title: "Backend clinic API",
+    owner: "codex",
+    nodeKind: "backend",
+    status: "completed",
+    nextRecommendation: "Ask Claude to refine the dashboard shell.",
+    claimedPaths: ["apps/api/src/server.ts"]
+  }));
+  session.peerMessages.push({
+    id: "msg-1",
+    taskId: "task-api",
+    from: "codex",
+    to: "claude",
+    intent: "context_share",
+    subject: "Dashboard shell next",
+    body: "Please take the next UI slice for the clinic dashboard.",
+    createdAt: "2026-04-10T00:02:30.000Z"
+  });
+
+  const packet = buildMissionAttentionPacket(buildSnapshot(session), [], mission);
+
+  assert.ok(packet);
+  assert.equal(packet?.items[0]?.kind, "provider");
+  assert.ok(packet?.items.some((item) => item.kind === "contract"));
+  assert.ok(packet?.items.some((item) => item.kind === "follow_up"));
+  assert.ok((packet?.criticalCount ?? 0) >= 1);
 });

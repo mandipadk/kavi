@@ -44,6 +44,7 @@ import { arenaSortValue, buildShadowMergePlan, compareMissionFamily, compareMiss
 import { buildMissionDriftReport, buildMissionPatchsets } from "./mission-evidence.ts";
 import { renderMissionGraph, resolveMissionGraphNodes } from "./mission-graph.ts";
 import {
+  buildMissionAttentionPacket,
   buildMissionConfidence,
   buildMissionDigest,
   buildMissionMorningBrief,
@@ -491,6 +492,7 @@ function renderUsage(): string {
     "  kavi mission patchsets [mission-id|latest] [--json]",
     "  kavi mission drift [mission-id|latest] [--json]",
     "  kavi mission confidence [mission-id|latest] [--json]",
+    "  kavi mission attention [mission-id|latest] [--json]",
     "  kavi mission digest [mission-id|latest] [--json]",
     "  kavi mission morning-brief [mission-id|latest] [--hours N] [--json]",
     "  kavi mission recover [mission-id|latest] [--retry-failed] [--resume-autopilot] [--reverify] [--all] [--json]",
@@ -1875,6 +1877,7 @@ async function commandMission(cwd: string, args: string[]): Promise<void> {
     args[0] === "patchsets" ||
     args[0] === "drift" ||
     args[0] === "confidence" ||
+    args[0] === "attention" ||
     args[0] === "digest" ||
     args[0] === "morning-brief" ||
     args[0] === "recover"
@@ -2066,6 +2069,35 @@ async function commandMission(cwd: string, args: string[]): Promise<void> {
       return;
     }
 
+    if (subcommand === "attention") {
+      const payload = buildMissionAttentionPacket(snapshot, artifacts, mission);
+      if (args.includes("--json")) {
+        console.log(JSON.stringify(payload, null, 2));
+        return;
+      }
+      if (!payload) {
+        console.log("No mission attention packet available.");
+        return;
+      }
+      console.log(`Mission attention: ${payload.missionId}`);
+      console.log(`Summary: ${payload.summary}`);
+      console.log(`Dominant area: ${payload.dominantArea ?? "-"}`);
+      console.log(`Counts: critical=${payload.criticalCount} | high=${payload.highCount} | normal=${payload.normalCount}`);
+      console.log("Items:");
+      for (const item of payload.items) {
+        console.log(`- [${item.urgency}/${item.kind}] ${item.title}`);
+        console.log(`  ${item.summary}`);
+        console.log(`  payoff: ${item.payoff}`);
+        if (item.command) {
+          console.log(`  action: ${item.command}`);
+        }
+      }
+      if (payload.items.length === 0) {
+        console.log("- none");
+      }
+      return;
+    }
+
     if (subcommand === "digest") {
       const payload = buildMissionDigest(snapshot, artifacts, mission);
       if (args.includes("--json")) {
@@ -2114,6 +2146,14 @@ async function commandMission(cwd: string, args: string[]): Promise<void> {
         for (const repairPlan of payload.activeRepairPlans) {
           console.log(`- ${repairPlan.owner} | ${repairPlan.summary}`);
         }
+      }
+      console.log("Attention packet:");
+      console.log(`- ${payload.attentionPacket.summary}`);
+      for (const item of payload.attentionPacket.items.slice(0, 5)) {
+        console.log(`  [${item.urgency}/${item.kind}] ${item.title}${item.command ? ` | ${item.command}` : ""}`);
+      }
+      if (payload.attentionPacket.items.length === 0) {
+        console.log("  - none");
       }
       return;
     }
@@ -2169,6 +2209,14 @@ async function commandMission(cwd: string, args: string[]): Promise<void> {
       }
       if (payload.openContracts.length === 0) {
         console.log("- none");
+      }
+      console.log("Attention packet:");
+      console.log(`- ${payload.attentionPacket.summary}`);
+      for (const item of payload.attentionPacket.items.slice(0, 5)) {
+        console.log(`  [${item.urgency}/${item.kind}] ${item.title}${item.command ? ` | ${item.command}` : ""}`);
+      }
+      if (payload.attentionPacket.items.length === 0) {
+        console.log("  - none");
       }
       console.log("First actions:");
       for (const item of payload.firstActions) {

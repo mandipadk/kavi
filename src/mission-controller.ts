@@ -11,6 +11,9 @@ import type {
   AgentContract,
   KaviSnapshot,
   Mission,
+  MissionAttentionItem,
+  MissionAttentionItemKind,
+  MissionAttentionPacket,
   MissionConfidence,
   MissionDigest,
   MissionMorningBrief,
@@ -94,6 +97,271 @@ function missionReviewCount(session: SessionRecord, missionId: string): number {
 
 function scorePenalty(score: number, value: number): number {
   return Math.max(0, score - value);
+}
+
+function clampPriority(value: number): number {
+  return Math.max(0, Math.min(100, Math.round(value)));
+}
+
+function buildAttentionSummary(packet: MissionAttentionPacket): string {
+  if (packet.items.length === 0) {
+    return "No urgent operator attention is currently required.";
+  }
+  const parts = [
+    packet.criticalCount > 0 ? `${packet.criticalCount} critical` : "",
+    packet.highCount > 0 ? `${packet.highCount} high` : "",
+    packet.normalCount > 0 ? `${packet.normalCount} normal` : ""
+  ].filter(Boolean);
+  return `${parts.join(", ")} attention item(s) are queued for operator review.`;
+}
+
+export function buildMissionAttentionPacket(
+  snapshot: KaviSnapshot,
+  artifacts: TaskArtifact[] = [],
+  mission: Mission | null = latestMission(snapshot.session)
+): MissionAttentionPacket | null {
+  if (!mission) {
+    return null;
+  }
+
+  const observability = buildMissionObservability(snapshot, artifacts, mission);
+  const audit = buildMissionAuditReport(snapshot.session, mission, artifacts);
+  const followUps = missionFollowUpRecommendations(snapshot, mission);
+  const openContracts = missionOpenContracts(snapshot.session, mission.id);
+  const blockingContracts = openContracts.filter((contract) => contract.dependencyImpact === "blocking");
+  const hotspots = missionHotspots(snapshot.session, mission.id);
+  const pendingApprovals = snapshot.approvals.filter((approval) => approval.status === "pending");
+  const degradedProviders = (snapshot.session.providerCapabilities ?? []).filter(
+    (manifest) => manifest.status === "degraded" || manifest.status === "unsupported"
+  );
+  const failureExplanations = explainMissionAcceptanceFailures(mission);
+  const activeRepairPlans = missionActiveRepairPlans(mission);
+  const items: MissionAttentionItem[] = [];
+
+  if (pendingApprovals.length > 0) {
+    items.push({
+      id: `attention-approvals-${mission.id}`,
+      missionId: mission.id,
+      kind: "approval",
+      urgency: "critical",
+      priority: 98,
+      title: `${pendingApprovals.length} approval request(s) are blocking progress`,
+      summary: "Agent work is paused until the operator resolves pending permission requests.",
+      payoff: "Unblocks the currently waiting task immediately.",
+      command: "kavi approvals",
+      role: null,
+      taskIds: pendingApprovals.flatMap((approval) => approval.taskId ? [approval.taskId] : []),
+      contractIds: [],
+      objectionIds: [],
+      recommendationIds: []
+    });
+  }
+
+  if (degradedProviders.length > 0) {
+    items.push({
+      id: `attention-providers-${mission.id}`,
+      missionId: mission.id,
+      kind: "provider",
+      urgency: "critical",
+      priority: 96,
+      title: "Provider readiness is degraded",
+      summary: degradedProviders
+        .map((manifest) => `${manifest.provider}:${manifest.status} ${manifest.errors[0] ?? manifest.warnings[0] ?? ""}`.trim())
+        .join(" | "),
+      payoff: "Restores execution capacity and prevents false recovery loops.",
+      command: "kavi doctor --json",
+      role: null,
+      taskIds: [],
+      contractIds: [],
+      objectionIds: [],
+      recommendationIds: []
+    });
+  }
+
+  for (const objection of (audit?.objections ?? []).filter((item) => item.severity === "critical").slice(0, 4)) {
+    items.push({
+      id: `attention-objection-${objection.id}`,
+      missionId: mission.id,
+      kind: objection.kind === "contract"
+        ? "contract"
+        : objection.kind === "drift"
+          ? "drift"
+          : objection.kind === "overlap"
+            ? "overlap"
+            : objection.kind === "follow_up"
+              ? "follow_up"
+              : objection.kind === "acceptance" || objection.kind === "verification"
+                ? "verification"
+                : "audit",
+      urgency: "critical",
+      priority: clampPriority(92 - items.length),
+      title: objection.title,
+      summary: objection.detail,
+      payoff: "Clears a release-blocking Quality Court objection.",
+      command: objection.suggestedAction,
+      role: objection.role,
+      taskIds: objection.likelyTaskIds,
+      contractIds: [],
+      objectionIds: [objection.id],
+      recommendationIds: []
+    });
+  }
+
+  if (blockingContracts.length > 0) {
+    items.push({
+      id: `attention-contracts-${mission.id}`,
+      missionId: mission.id,
+      kind: "contract",
+      urgency: "high",
+      priority: 86,
+      title: `${blockingContracts.length} blocking contract(s) remain open`,
+      summary: blockingContracts.slice(0, 3).map((contract) => contract.title).join(" | "),
+      payoff: "Restores cross-agent dependency flow and reduces execution stalls.",
+      command: "kavi contracts latest",
+      role: "contract_auditor",
+      taskIds: blockingContracts.map((contract) => contract.sourceTaskId),
+      contractIds: blockingContracts.map((contract) => contract.id),
+      objectionIds: [],
+      recommendationIds: []
+    });
+  }
+
+  if (hotspots.length > 0) {
+    items.push({
+      id: `attention-overlap-${mission.id}`,
+      missionId: mission.id,
+      kind: "overlap",
+      urgency: "high",
+      priority: 84,
+      title: `${hotspots.length} overlap hotspot(s) need integration`,
+      summary: hotspots.slice(0, 5).join(" | "),
+      payoff: "Reduces merge friction and keeps landing paths clear.",
+      command: "kavi recommend",
+      role: "integration_auditor",
+      taskIds: missionTasks(snapshot.session, mission.id)
+        .filter((task) =>
+          task.claimedPaths.some((claim) =>
+            hotspots.some((hotspot) => claim === hotspot || claim.startsWith(`${hotspot}/`) || hotspot.startsWith(`${claim}/`))
+          )
+        )
+        .map((task) => task.id),
+      contractIds: [],
+      objectionIds: [],
+      recommendationIds: []
+    });
+  }
+
+  if (followUps.length > 0) {
+    items.push({
+      id: `attention-followups-${mission.id}`,
+      missionId: mission.id,
+      kind: "follow_up",
+      urgency: "high",
+      priority: 80,
+      title: `${followUps.length} follow-up recommendation(s) need review`,
+      summary: followUps.slice(0, 3).map((item) => item.title).join(" | "),
+      payoff: "Keeps the mission moving instead of leaving optional next slices unclaimed.",
+      command: "kavi recommend",
+      role: "contract_auditor",
+      taskIds: followUps.flatMap((item) => item.taskIds),
+      contractIds: [],
+      objectionIds: [],
+      recommendationIds: followUps.map((item) => item.id)
+    });
+  }
+
+  if (mission.acceptance.status === "failed" || activeRepairPlans.length > 0) {
+    items.push({
+      id: `attention-repairs-${mission.id}`,
+      missionId: mission.id,
+      kind: "repair",
+      urgency: mission.acceptance.status === "failed" ? "critical" : "high",
+      priority: mission.acceptance.status === "failed" ? 89 : 74,
+      title: mission.acceptance.status === "failed"
+        ? "Acceptance repair work is required"
+        : `${activeRepairPlans.length} repair plan(s) remain queued`,
+      summary:
+        failureExplanations[0]?.summary ??
+        activeRepairPlans[0]?.summary ??
+        "Acceptance-driven repairs are still pending.",
+      payoff: "Moves the mission back toward verification and landing.",
+      command: "kavi repair-plan latest",
+      role: "verifier",
+      taskIds: activeRepairPlans.flatMap((plan) => plan.queuedTaskId ? [plan.queuedTaskId] : []),
+      contractIds: [],
+      objectionIds: [],
+      recommendationIds: []
+    });
+  }
+
+  if (
+    mission.acceptance.status === "pending" &&
+    (observability?.runningTasks ?? 0) === 0 &&
+    (observability?.pendingTasks ?? 0) === 0
+  ) {
+    items.push({
+      id: `attention-verify-${mission.id}`,
+      missionId: mission.id,
+      kind: "verification",
+      urgency: "high",
+      priority: 72,
+      title: "Mission acceptance is pending verification",
+      summary: "Implementation is idle, but the acceptance suite has not been run yet.",
+      payoff: "Quickly determines whether the mission is landable or needs repair.",
+      command: "kavi verify latest",
+      role: "verifier",
+      taskIds: [],
+      contractIds: [],
+      objectionIds: [],
+      recommendationIds: []
+    });
+  }
+
+  const driftPack = audit?.roleReports
+    .find((report) => report.role === "risk_auditor")
+    ?.evidencePacks
+    .find((pack) => pack.kind === "mission_drift" && pack.stance === "objection");
+  if (driftPack) {
+    items.push({
+      id: `attention-drift-${mission.id}`,
+      missionId: mission.id,
+      kind: "drift",
+      urgency: driftPack.severity === "major" ? "high" : "normal",
+      priority: driftPack.severity === "major" ? 70 : 58,
+      title: driftPack.title,
+      summary: driftPack.summary,
+      payoff: "Brings the delivered work back in line with the mission spec and blueprint.",
+      command: driftPack.suggestedAction,
+      role: "risk_auditor",
+      taskIds: driftPack.taskIds,
+      contractIds: driftPack.contractIds,
+      objectionIds: [],
+      recommendationIds: []
+    });
+  }
+
+  items.sort((left, right) => {
+    if (left.priority !== right.priority) {
+      return right.priority - left.priority;
+    }
+    return left.title.localeCompare(right.title);
+  });
+
+  const criticalCount = items.filter((item) => item.urgency === "critical").length;
+  const highCount = items.filter((item) => item.urgency === "high").length;
+  const normalCount = items.filter((item) => item.urgency === "normal").length;
+  const packet: MissionAttentionPacket = {
+    missionId: mission.id,
+    generatedAt: nowIso(),
+    summary: "",
+    dominantArea: items[0]?.kind ?? null,
+    criticalCount,
+    highCount,
+    normalCount,
+    items
+  };
+  packet.summary = buildAttentionSummary(packet);
+  return packet;
 }
 
 export function buildMissionConfidence(
@@ -458,6 +726,16 @@ export function buildMissionDigest(
   const repairPlans = missionActiveRepairPlans(mission);
   const failurePacks = missionFailurePacks(mission);
   const recoveryPlan = buildMissionRecoveryPlan(snapshot, artifacts, mission);
+  const attentionPacket = buildMissionAttentionPacket(snapshot, artifacts, mission) ?? {
+    missionId: mission.id,
+    generatedAt: nowIso(),
+    summary: "No urgent operator attention is currently required.",
+    dominantArea: null,
+    criticalCount: 0,
+    highCount: 0,
+    normalCount: 0,
+    items: []
+  };
   const headline =
     mission.landedAt
       ? "Mission is landed."
@@ -529,6 +807,7 @@ export function buildMissionDigest(
       blockers: [],
       actions: []
     },
+    attentionPacket,
     generatedAt: nowIso()
   };
 }
@@ -580,22 +859,20 @@ export function buildMissionMorningBrief(
   const qualityCourt = buildMissionAuditReport(snapshot.session, mission, artifacts);
   const observability = buildMissionObservability(snapshot, artifacts, mission);
   const failureExplanations = explainMissionAcceptanceFailures(mission);
+  const attentionPacket = buildMissionAttentionPacket(snapshot, artifacts, mission) ?? {
+    missionId: mission.id,
+    generatedAt: nowIso(),
+    summary: "No urgent operator attention is currently required.",
+    dominantArea: null,
+    criticalCount: 0,
+    highCount: 0,
+    normalCount: 0,
+    items: []
+  };
   const firstActions: string[] = [];
 
-  if (qualityCourt?.verdict === "blocked") {
-    firstActions.push("Run `kavi judge latest` and clear the release-blocking objections first.");
-  }
-  if (recentFailedTasks.length > 0) {
-    firstActions.push(`Retry or reroute ${recentFailedTasks[0].taskId} after reviewing its failure output.`);
-  }
-  if (openContracts.length > 0) {
-    firstActions.push("Review open contracts with `kavi contracts latest` and apply the next safe handoff.");
-  }
-  if (mission.acceptance.status === "pending" && (observability?.runningTasks ?? 0) === 0 && (observability?.pendingTasks ?? 0) === 0) {
-    firstActions.push("Run `kavi verify latest` to execute the pending acceptance suite.");
-  }
-  if (failureExplanations.length > 0) {
-    firstActions.push(`Inspect the top acceptance failure: ${failureExplanations[0].title}.`);
+  for (const item of attentionPacket.items.slice(0, 4)) {
+    firstActions.push(item.command ? `${item.title} (${item.command})` : item.title);
   }
   if (firstActions.length === 0 && qualityCourt?.verdict === "approved") {
     firstActions.push("Mission is green; review the latest result and land when ready.");
@@ -633,6 +910,7 @@ export function buildMissionMorningBrief(
     openContracts,
     recentReceipts,
     qualityCourt,
+    attentionPacket,
     firstActions
   };
 }

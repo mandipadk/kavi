@@ -1057,6 +1057,45 @@ export interface MissionRecoveryPlan {
   actions: MissionRecoveryAction[];
 }
 
+export type MissionAttentionItemKind =
+  | "approval"
+  | "provider"
+  | "audit"
+  | "contract"
+  | "follow_up"
+  | "repair"
+  | "verification"
+  | "overlap"
+  | "drift";
+
+export interface MissionAttentionItem {
+  id: string;
+  missionId: string;
+  kind: MissionAttentionItemKind;
+  urgency: "critical" | "high" | "normal";
+  priority: number;
+  title: string;
+  summary: string;
+  payoff: string;
+  command: string | null;
+  role: QualityCourtRole | null;
+  taskIds: string[];
+  contractIds: string[];
+  objectionIds: string[];
+  recommendationIds: string[];
+}
+
+export interface MissionAttentionPacket {
+  missionId: string;
+  generatedAt: string;
+  summary: string;
+  dominantArea: MissionAttentionItemKind | null;
+  criticalCount: number;
+  highCount: number;
+  normalCount: number;
+  items: MissionAttentionItem[];
+}
+
 export interface MissionDigest {
   missionId: string;
   title: string;
@@ -1090,6 +1129,7 @@ export interface MissionDigest {
   activeRepairPlans: AcceptanceRepairPlan[];
   failurePacks: AcceptanceFailurePack[];
   recoveryPlan: MissionRecoveryPlan;
+  attentionPacket: MissionAttentionPacket;
   generatedAt: string;
 }
 
@@ -1131,6 +1171,7 @@ export interface MissionMorningBrief {
   openContracts: AgentContract[];
   recentReceipts: MissionReceipt[];
   qualityCourt: MissionAuditReport | null;
+  attentionPacket: MissionAttentionPacket;
   firstActions: string[];
 }
 
