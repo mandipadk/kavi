@@ -133,6 +133,10 @@ export async function sendRpcRequest<T>(
         try {
           response = JSON.parse(line) as RpcResponse;
         } catch (error) {
+          if (error instanceof Error && /Unexpected end of JSON input/i.test(error.message)) {
+            buffer = `${line}\n${buffer}`;
+            return;
+          }
           finish(() => {
             reject(
               new Error(

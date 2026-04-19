@@ -257,6 +257,8 @@ test("buildPatternBenchmarks and composePatternTemplates expose portfolio levera
 
   assert.ok(benchmarks.length >= 1);
   assert.ok(benchmarks[0]!.score > 0);
+  assert.ok(benchmarks[0]!.trustScore >= 0);
+  assert.ok(["high_trust", "promising", "noisy", "fragile"].includes(benchmarks[0]!.trustClass));
   assert.ok(composition.templateIds.length >= 1);
   assert.ok(composition.templateIds.every((templateId) => !templateId.startsWith("template:anti_pattern")));
   assert.match(composition.composedPrompt, /Composed portfolio pattern context selected by Kavi/);
@@ -340,12 +342,14 @@ test("captureMissionAntiPatterns and buildPatternConstellation surface recurring
   assert.ok(constellation.repoClusters.length >= 1);
   assert.ok(constellation.repoClusters.some((cluster) => cluster.labels.includes(path.basename(repoRoot))));
   assert.ok(constellation.clusterInsights.length >= 1);
+  assert.ok(constellation.clusterInsights.some((cluster) => cluster.trustScore >= 0));
   assert.ok(constellation.clusterInsights.some((cluster) => cluster.commandHabits.length >= 1));
   assert.ok(constellation.templates.length >= 1);
   assert.ok(constellation.templateLinks.length >= 1);
   assert.ok(constellation.commandHabits.some((habit) => habit.command === "npm test"));
   assert.ok(constellation.startingPoints.length >= 1);
   assert.ok(constellation.startingPoints.some((entry) => entry.benchmarkScore > 0));
+  assert.ok(constellation.startingPoints.some((entry) => ["high_trust", "promising", "noisy", "fragile"].includes(entry.trustClass)));
   assert.ok(constellation.antiPatternHotspots.some((item) => item.value.includes("docs expectations")));
 });
 
@@ -393,4 +397,93 @@ test("buildPatternConstellation derives useful signals from legacy sparse patter
   assert.ok(constellation.commandHabits.some((habit) => habit.command === "npm run build"));
   assert.ok(constellation.startingPoints.length >= 1);
   assert.ok(!constellation.topTags.some((item) => item.value === "with"));
+});
+
+test("buildPatternBenchmarks prefers recent low-repair templates over noisy ones", async () => {
+  const repoRoot = await mkdtemp(path.join(os.tmpdir(), "kavi-pattern-trust-"));
+  const stableRepoRoot = `${repoRoot}-stable`;
+  const noisyRepoRoot = `${repoRoot}-noisy`;
+  const paths = {
+    ...resolveAppPaths(repoRoot),
+    patternsFile: path.join(repoRoot, ".kavi-patterns.json")
+  };
+
+  await writeFile(
+    paths.patternsFile,
+    JSON.stringify([
+      {
+        id: "pattern-stable",
+        sourceRepoRoot: stableRepoRoot,
+        missionId: "mission-stable",
+        reportId: "report-stable",
+        kind: "delivery",
+        title: "Reliable clinic dashboard starter",
+        summary: "Recent landed dashboard with docs and validation.",
+        prompt: "Build a clinic dashboard with docs and API.",
+        tags: ["clinic", "dashboard", "docs"],
+        stackSignals: ["typescript"],
+        nodeKinds: ["frontend"],
+        acceptanceCriteria: ["Docs exist", "HTTP check passes", "Browser flow loads"],
+        confidence: 0.92,
+        usageCount: 3,
+        sourceMissionIds: ["mission-stable"],
+        antiPatternSignals: [],
+        examplePaths: ["apps/web/app/page.tsx", "apps/api/src/server.ts"],
+        commands: ["npm run build", "npm test"],
+        createdAt: "2026-04-10T00:00:00.000Z",
+        updatedAt: "2026-04-15T00:00:00.000Z"
+      },
+      {
+        id: "pattern-noisy",
+        sourceRepoRoot: noisyRepoRoot,
+        missionId: "mission-noisy",
+        reportId: "report-noisy",
+        kind: "delivery",
+        title: "Older clinic dashboard starter",
+        summary: "Older landed dashboard with weaker validation.",
+        prompt: "Build a clinic dashboard.",
+        tags: ["clinic", "worker"],
+        stackSignals: ["python"],
+        nodeKinds: ["backend"],
+        acceptanceCriteria: ["Docs exist"],
+        confidence: 0.7,
+        usageCount: 5,
+        sourceMissionIds: ["mission-noisy"],
+        antiPatternSignals: [],
+        examplePaths: ["apps/web/app/page.tsx"],
+        commands: ["npm run build"],
+        createdAt: "2025-12-01T00:00:00.000Z",
+        updatedAt: "2025-12-01T00:00:00.000Z"
+      },
+      {
+        id: "pattern-noisy-anti",
+        sourceRepoRoot: noisyRepoRoot,
+        missionId: "mission-noisy",
+        reportId: null,
+        kind: "anti_pattern",
+        title: "Dashboard docs drift",
+        summary: "This family frequently misses docs and verification follow-through.",
+        prompt: "Avoid weak docs coverage for clinic dashboards.",
+        tags: ["clinic", "worker", "docs-drift"],
+        stackSignals: ["python"],
+        nodeKinds: ["backend"],
+        acceptanceCriteria: [],
+        confidence: 0.6,
+        usageCount: 1,
+        sourceMissionIds: ["mission-noisy"],
+        antiPatternSignals: ["docs expectations", "verification drift"],
+        examplePaths: ["README.md"],
+        commands: [],
+        createdAt: "2026-04-12T00:00:00.000Z",
+        updatedAt: "2026-04-12T00:00:00.000Z"
+      }
+    ]),
+    "utf-8"
+  );
+
+  const benchmarks = await buildPatternBenchmarks(paths);
+  assert.ok(benchmarks.length >= 2);
+  assert.ok(benchmarks[0]!.trustScore >= benchmarks[1]!.trustScore);
+  assert.ok(["high_trust", "promising"].includes(benchmarks[0]!.trustClass));
+  assert.ok(benchmarks.some((item) => item.trustClass === "fragile" || item.trustClass === "noisy"));
 });

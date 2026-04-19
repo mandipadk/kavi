@@ -456,6 +456,10 @@ export class KaviDaemon {
           try {
             request = JSON.parse(line) as RpcRequest;
           } catch (error) {
+            if (error instanceof Error && /Unexpected end of JSON input/i.test(error.message)) {
+              buffer = `${line}\n${buffer}`;
+              return;
+            }
             this.writeRpc(socket, {
               id: "parse-error",
               error: {

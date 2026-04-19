@@ -61,6 +61,57 @@ function unique(values: string[]): string[] {
   return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
 }
 
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
+}
+
+function daysSince(timestamp: string | null | undefined): number {
+  if (!timestamp) {
+    return 365;
+  }
+  const parsed = Date.parse(timestamp);
+  if (!Number.isFinite(parsed)) {
+    return 365;
+  }
+  return Math.max(0, Math.round((Date.now() - parsed) / 86_400_000));
+}
+
+function summarizeTrustClass(
+  trustScore: number,
+  repairPressure: number
+): "high_trust" | "promising" | "noisy" | "fragile" {
+  if (trustScore >= 80 && repairPressure <= 25) {
+    return "high_trust";
+  }
+  if (trustScore >= 60 && repairPressure <= 45) {
+    return "promising";
+  }
+  if (repairPressure >= 70 || trustScore < 35) {
+    return "fragile";
+  }
+  return "noisy";
+}
+
+function summarizeStabilityTrend(
+  recentSuccessCount: number,
+  recentAntiPatternCount: number,
+  successCount: number,
+  antiPatternCount: number
+): "improving" | "steady" | "volatile" {
+  const historicalSuccessPressure = successCount - recentSuccessCount;
+  const historicalFailurePressure = antiPatternCount - recentAntiPatternCount;
+  if (recentSuccessCount > recentAntiPatternCount + historicalFailurePressure) {
+    return "improving";
+  }
+  if (recentAntiPatternCount > 0 && recentAntiPatternCount >= recentSuccessCount) {
+    return "volatile";
+  }
+  if (historicalFailurePressure > historicalSuccessPressure) {
+    return "volatile";
+  }
+  return "steady";
+}
+
 function normalizePortablePatternCommand(command: string): string | null {
   const normalized = command.replaceAll(/\s+/g, " ").trim();
   if (!normalized) {
@@ -122,6 +173,13 @@ function countBy<T>(
 function overlapValues(left: string[], right: string[]): string[] {
   const rightSet = new Set(right.map((value) => normalizeText(value)));
   return unique(left.filter((value) => rightSet.has(normalizeText(value))));
+}
+
+function antiPatternAffinity(entry: PatternEntry, template: PatternTemplate): number {
+  const sharedStacks = overlapValues(template.stacks, deriveStackSignals(entry));
+  const sharedNodeKinds = overlapValues(template.nodeKinds, deriveNodeKinds(entry));
+  const sharedRepoRoots = overlapValues(template.repoRoots, [entry.sourceRepoRoot]);
+  return sharedRepoRoots.length * 4 + sharedStacks.length * 2 + sharedNodeKinds.length;
 }
 
 function buildRepoClusters(
@@ -316,11 +374,14 @@ function buildPortfolioStartingPoints(
       const benchmarkScore = benchmark?.score ?? Math.round(template.confidence * 100);
       const score =
         benchmarkScore +
+        (benchmark?.trustScore ?? 0) +
         template.repoRoots.length * 3 +
         Math.min(15, template.patternIds.length * 2) -
         Math.min(18, template.antiPatternSignals.length * 2);
       const reasons = unique([
         benchmarkScore > 0 ? `benchmark:${benchmarkScore}` : "",
+        benchmark ? `trust:${benchmark.trustClass}` : "",
+        benchmark ? `repair-pressure:${benchmark.repairPressure}` : "",
         template.repoRoots.length > 1 ? `shared-by:${template.repoRoots.length}-repos` : "",
         template.commands.length > 0 ? "portable-command-habits" : "",
         template.acceptanceCriteria.length > 0 ? "acceptance-defaults" : "",
@@ -331,6 +392,10 @@ function buildPortfolioStartingPoints(
         label: template.label,
         score,
         benchmarkScore,
+        trustScore: benchmark?.trustScore ?? Math.round(template.confidence * 100),
+        trustClass: benchmark?.trustClass ?? "promising",
+        recencyScore: benchmark?.recencyScore ?? 0,
+        repairPressure: benchmark?.repairPressure ?? 0,
         repoRoots: template.repoRoots,
         stacks: template.stacks,
         nodeKinds: template.nodeKinds,
@@ -384,9 +449,26 @@ function buildPortfolioClusterInsights(
         : Math.round(
             scoredTemplates.reduce((sum, item) => sum + item.benchmarkScore, 0) / scoredTemplates.length
           );
+    const trustScores = scoredTemplates.map((item) => benchmarkByTemplateId.get(item.template.id)?.trustScore ?? 0);
+    const repairPressures = scoredTemplates.map((item) => benchmarkByTemplateId.get(item.template.id)?.repairPressure ?? 0);
+    const recencyScores = scoredTemplates.map((item) => benchmarkByTemplateId.get(item.template.id)?.recencyScore ?? 0);
+    const trustScore =
+      trustScores.length === 0
+        ? 0
+        : Math.round(trustScores.reduce((sum, value) => sum + value, 0) / trustScores.length);
+    const repairPressure =
+      repairPressures.length === 0
+        ? 0
+        : Math.round(repairPressures.reduce((sum, value) => sum + value, 0) / repairPressures.length);
+    const recencyScore =
+      recencyScores.length === 0
+        ? 0
+        : Math.round(recencyScores.reduce((sum, value) => sum + value, 0) / recencyScores.length);
+    const trustClass = summarizeTrustClass(trustScore, repairPressure);
     const summaryParts = [
       cluster.labels.length > 0 ? `Cluster spans ${cluster.labels.join(", ")}` : "",
       cluster.stacks.length > 0 ? `Common stacks: ${cluster.stacks.join(", ")}` : "",
+      trustScore > 0 ? `Trust: ${trustClass} (${trustScore})` : "",
       commandHabits[0] ? `Typical command habit: ${commandHabits[0].command}` : "",
       acceptanceCriteria[0] ? `Typical acceptance: ${acceptanceCriteria[0].value}` : "",
       antiPatternHotspots[0] ? `Watch for: ${antiPatternHotspots[0].value}` : ""
@@ -403,12 +485,17 @@ function buildPortfolioClusterInsights(
       acceptanceCriteria,
       antiPatternHotspots,
       benchmarkScore,
+      trustScore,
+      trustClass,
+      recencyScore,
+      repairPressure,
       templateIds: clusterTemplates.map((template) => template.id),
       recommendedTemplateIds: recommendedTemplates,
       summary: summaryParts.join(". "),
       score:
         cluster.score +
         benchmarkScore +
+        trustScore +
         commandHabits.length * 2 +
         acceptanceCriteria.length -
         antiPatternHotspots.length
@@ -915,6 +1002,7 @@ export async function buildPatternBenchmarks(paths: AppPaths): Promise<PatternBe
   const patterns = await listPatterns(paths);
   const templates = buildPatternTemplatesFromEntries(patterns);
   const patternById = new Map(patterns.map((entry) => [entry.id, entry] as const));
+  const recentWindowDays = 45;
 
   return templates
     .map((template) => {
@@ -923,14 +1011,16 @@ export async function buildPatternBenchmarks(paths: AppPaths): Promise<PatternBe
         .filter((entry): entry is PatternEntry => Boolean(entry));
       const antiPatternEntries = patterns.filter((entry) =>
         entry.kind === "anti_pattern" &&
-        (
-          overlapValues(template.stacks, deriveStackSignals(entry)).length > 0 ||
-          overlapValues(template.nodeKinds, deriveNodeKinds(entry)).length > 0 ||
-          overlapValues(template.repoRoots, [entry.sourceRepoRoot]).length > 0
-        )
+        antiPatternAffinity(entry, template) >= 4
       );
       const successCount = supportingEntries.filter((entry) => entry.kind !== "anti_pattern").length;
+      const recentSuccessCount = supportingEntries.filter(
+        (entry) => entry.kind !== "anti_pattern" && daysSince(entry.updatedAt) <= recentWindowDays
+      ).length;
       const antiPatternCount = antiPatternEntries.length;
+      const recentAntiPatternCount = antiPatternEntries.filter(
+        (entry) => daysSince(entry.updatedAt) <= recentWindowDays
+      ).length;
       const deliveryCount = supportingEntries.filter((entry) => entry.kind === "delivery").length;
       const repoCount = template.repoRoots.length;
       const averageConfidence = Number(
@@ -939,13 +1029,46 @@ export async function buildPatternBenchmarks(paths: AppPaths): Promise<PatternBe
           Math.max(1, supportingEntries.length)
         ).toFixed(2)
       );
+      const recencyValues = supportingEntries.map((entry) => 100 - clamp(daysSince(entry.updatedAt), 0, 100));
+      const recencyScore =
+        recencyValues.length === 0
+          ? 0
+          : Math.round(recencyValues.reduce((sum, value) => sum + value, 0) / recencyValues.length);
+      const acceptanceDepth = unique(
+        supportingEntries.flatMap((entry) => entry.acceptanceCriteria ?? [])
+      ).length;
+      const repairPressure =
+        successCount === 0
+          ? antiPatternCount > 0 ? 100 : 0
+          : clamp(Math.round((antiPatternCount / successCount) * 100), 0, 100);
+      const trustScore = clamp(
+        Math.round(
+          averageConfidence * 35 +
+          recencyScore * 0.25 +
+          Math.min(18, acceptanceDepth * 3) +
+          Math.min(10, recentSuccessCount * 2) +
+          Math.min(8, repoCount * 1.5) -
+          repairPressure * 0.35 -
+          recentAntiPatternCount * 6
+        ),
+        0,
+        100
+      );
+      const trustClass = summarizeTrustClass(trustScore, repairPressure);
+      const stabilityTrend = summarizeStabilityTrend(
+        recentSuccessCount,
+        recentAntiPatternCount,
+        successCount,
+        antiPatternCount
+      );
       const score = Math.max(
         0,
         Math.round(
           successCount * 7 +
           deliveryCount * 5 +
           repoCount * 2 +
-          averageConfidence * 20 -
+          averageConfidence * 20 +
+          trustScore * 0.6 -
           antiPatternCount * 6
         )
       );
@@ -954,11 +1077,19 @@ export async function buildPatternBenchmarks(paths: AppPaths): Promise<PatternBe
         label: template.label,
         kind: template.kind,
         score,
+        trustScore,
+        trustClass,
+        stabilityTrend,
         successCount,
+        recentSuccessCount,
         antiPatternCount,
+        recentAntiPatternCount,
         deliveryCount,
         repoCount,
         averageConfidence,
+        recencyScore,
+        repairPressure,
+        acceptanceDepth,
         commands: template.commands,
         acceptanceCriteria: template.acceptanceCriteria,
         antiPatternSignals: unique([

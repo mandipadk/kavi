@@ -4407,6 +4407,7 @@ async function commandPatterns(cwd: string, args: string[]): Promise<void> {
       for (const cluster of payload.clusterInsights.slice(0, 6)) {
         console.log(`- ${cluster.labels.join(" + ")} | benchmark=${cluster.benchmarkScore} | score=${cluster.score}`);
         console.log(`  summary: ${cluster.summary || "-"}`);
+        console.log(`  trust: ${cluster.trustClass} (${cluster.trustScore}) | recency=${cluster.recencyScore} | repair-pressure=${cluster.repairPressure}`);
         console.log(`  commands: ${cluster.commandHabits.map((item) => `${item.command} (${item.count})`).join(" | ") || "-"}`);
         console.log(`  acceptance: ${cluster.acceptanceCriteria.map((item) => `${item.value} (${item.count})`).join(" | ") || "-"}`);
         console.log(`  anti-patterns: ${cluster.antiPatternHotspots.map((item) => `${item.value} (${item.count})`).join(" | ") || "-"}`);
@@ -4439,6 +4440,7 @@ async function commandPatterns(cwd: string, args: string[]): Promise<void> {
       console.log("Starting points:");
       for (const entry of payload.startingPoints.slice(0, 6)) {
         console.log(`- ${entry.label} | score=${entry.score} | benchmark=${entry.benchmarkScore}`);
+        console.log(`  trust: ${entry.trustClass} (${entry.trustScore}) | recency=${entry.recencyScore} | repair-pressure=${entry.repairPressure}`);
         console.log(`  reasons: ${entry.reasons.join(", ") || "-"}`);
         console.log(`  stacks: ${entry.stacks.join(", ") || "-"}`);
         console.log(`  nodes: ${entry.nodeKinds.join(", ") || "-"}`);
@@ -4518,8 +4520,9 @@ async function commandPatterns(cwd: string, args: string[]): Promise<void> {
     }
     for (const benchmark of payload.slice(0, hasFlag(args, "--all") ? Number.MAX_SAFE_INTEGER : 12)) {
       console.log(`${benchmark.templateId} | score=${benchmark.score} | ${benchmark.label}`);
+      console.log(`  trust=${benchmark.trustClass} (${benchmark.trustScore}) | recency=${benchmark.recencyScore} | repair-pressure=${benchmark.repairPressure} | trend=${benchmark.stabilityTrend}`);
       console.log(
-        `  success=${benchmark.successCount} delivery=${benchmark.deliveryCount} anti=${benchmark.antiPatternCount} repos=${benchmark.repoCount} confidence=${(benchmark.averageConfidence * 100).toFixed(0)}%`
+        `  success=${benchmark.successCount} recent-success=${benchmark.recentSuccessCount} delivery=${benchmark.deliveryCount} anti=${benchmark.antiPatternCount} recent-anti=${benchmark.recentAntiPatternCount} repos=${benchmark.repoCount} confidence=${(benchmark.averageConfidence * 100).toFixed(0)}% acceptance-depth=${benchmark.acceptanceDepth}`
       );
       console.log(`  commands: ${benchmark.commands.join(" | ") || "-"}`);
       console.log(`  acceptance: ${benchmark.acceptanceCriteria.join(" | ") || "-"}`);
@@ -4561,8 +4564,9 @@ async function commandPatterns(cwd: string, args: string[]): Promise<void> {
       console.log("Selected template benchmarks:");
       for (const benchmark of payload.selectedBenchmarks) {
         console.log(`- ${benchmark.label} | score=${benchmark.score}`);
+        console.log(`  trust=${benchmark.trustClass} (${benchmark.trustScore}) | recency=${benchmark.recencyScore} | repair-pressure=${benchmark.repairPressure} | trend=${benchmark.stabilityTrend}`);
         console.log(
-          `  success=${benchmark.successCount} delivery=${benchmark.deliveryCount} anti=${benchmark.antiPatternCount} repos=${benchmark.repoCount}`
+          `  success=${benchmark.successCount} recent-success=${benchmark.recentSuccessCount} delivery=${benchmark.deliveryCount} anti=${benchmark.antiPatternCount} recent-anti=${benchmark.recentAntiPatternCount} repos=${benchmark.repoCount}`
         );
       }
     }
@@ -4578,6 +4582,7 @@ async function commandPatterns(cwd: string, args: string[]): Promise<void> {
       for (const cluster of payload.relatedClusterInsights.slice(0, 6)) {
         console.log(`- ${cluster.labels.join(" + ")} | benchmark=${cluster.benchmarkScore} | score=${cluster.score}`);
         console.log(`  summary: ${cluster.summary || "-"}`);
+        console.log(`  trust: ${cluster.trustClass} (${cluster.trustScore}) | recency=${cluster.recencyScore} | repair-pressure=${cluster.repairPressure}`);
         console.log(`  commands: ${cluster.commandHabits.map((item) => `${item.command} (${item.count})`).join(" | ") || "-"}`);
       }
     }
@@ -4592,6 +4597,7 @@ async function commandPatterns(cwd: string, args: string[]): Promise<void> {
       console.log("Related starting points:");
       for (const entry of payload.relatedStartingPoints.slice(0, 6)) {
         console.log(`- ${entry.label} | score=${entry.score}`);
+        console.log(`  trust: ${entry.trustClass} (${entry.trustScore}) | recency=${entry.recencyScore} | repair-pressure=${entry.repairPressure}`);
         console.log(`  reasons: ${entry.reasons.join(", ") || "-"}`);
       }
     }
@@ -4827,6 +4833,7 @@ async function commandPortfolio(cwd: string, args: string[]): Promise<void> {
     for (const cluster of graph.clusterInsights.slice(0, 8)) {
       console.log(`- ${cluster.labels.join(" + ")} | benchmark=${cluster.benchmarkScore} | score=${cluster.score}`);
       console.log(`  summary: ${cluster.summary || "-"}`);
+      console.log(`  trust: ${cluster.trustClass} (${cluster.trustScore}) | recency=${cluster.recencyScore} | repair-pressure=${cluster.repairPressure}`);
       console.log(`  commands: ${cluster.commandHabits.map((item) => `${item.command} (${item.count})`).join(" | ") || "-"}`);
       console.log(`  acceptance: ${cluster.acceptanceCriteria.map((item) => `${item.value} (${item.count})`).join(" | ") || "-"}`);
     }
@@ -4842,6 +4849,7 @@ async function commandPortfolio(cwd: string, args: string[]): Promise<void> {
     console.log("Starting points:");
     for (const entry of graph.startingPoints.slice(0, 8)) {
       console.log(`- ${entry.label} | score=${entry.score} | benchmark=${entry.benchmarkScore}`);
+      console.log(`  trust: ${entry.trustClass} (${entry.trustScore}) | recency=${entry.recencyScore} | repair-pressure=${entry.repairPressure}`);
       console.log(`  reasons: ${entry.reasons.join(", ") || "-"}`);
       console.log(`  repos: ${entry.repoRoots.map((root) => path.basename(root)).join(", ") || "-"}`);
       console.log(`  commands: ${entry.commands.join(" | ") || "-"}`);
@@ -4851,6 +4859,7 @@ async function commandPortfolio(cwd: string, args: string[]): Promise<void> {
     console.log("Top benchmarks:");
     for (const benchmark of graph.benchmarks.slice(0, 8)) {
       console.log(`- ${benchmark.label} | score=${benchmark.score}`);
+      console.log(`  trust=${benchmark.trustClass} (${benchmark.trustScore}) | recency=${benchmark.recencyScore} | repair-pressure=${benchmark.repairPressure} | trend=${benchmark.stabilityTrend}`);
       console.log(`  success=${benchmark.successCount} anti=${benchmark.antiPatternCount} repos=${benchmark.repoCount}`);
     }
   }
