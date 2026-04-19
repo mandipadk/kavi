@@ -41,6 +41,7 @@ import {
 } from "./git.ts";
 import { executeLand } from "./landing.ts";
 import { arenaSortValue, buildShadowMergePlan, compareMissionFamily, compareMissions } from "./mission-compare.ts";
+import { buildMissionDriftReport, buildMissionPatchsets } from "./mission-evidence.ts";
 import { renderMissionGraph, resolveMissionGraphNodes } from "./mission-graph.ts";
 import {
   buildMissionConfidence,
@@ -487,6 +488,8 @@ function renderUsage(): string {
     "  kavi mission spec [mission-id|latest] [--json]",
     "  kavi mission diff [mission-id|latest] [--from-version N] [--to-version N] [--prompt \"...\"] [--json]",
     "  kavi mission simulate [mission-id|latest] [--json]",
+    "  kavi mission patchsets [mission-id|latest] [--json]",
+    "  kavi mission drift [mission-id|latest] [--json]",
     "  kavi mission confidence [mission-id|latest] [--json]",
     "  kavi mission digest [mission-id|latest] [--json]",
     "  kavi mission morning-brief [mission-id|latest] [--hours N] [--json]",
@@ -1869,6 +1872,8 @@ async function commandMission(cwd: string, args: string[]): Promise<void> {
     args[0] === "spec" ||
     args[0] === "diff" ||
     args[0] === "simulate" ||
+    args[0] === "patchsets" ||
+    args[0] === "drift" ||
     args[0] === "confidence" ||
     args[0] === "digest" ||
     args[0] === "morning-brief" ||
@@ -2333,6 +2338,55 @@ async function commandMission(cwd: string, args: string[]): Promise<void> {
         }
         if (requestedVerification) {
           console.log(`- reverified acceptance (${reverifiedMission?.acceptance.status ?? "unknown"})`);
+        }
+      }
+      return;
+    }
+
+    if (subcommand === "patchsets") {
+      const payload = buildMissionPatchsets(session, artifacts, mission);
+      if (args.includes("--json")) {
+        console.log(JSON.stringify(payload, null, 2));
+        return;
+      }
+      if (payload.length === 0) {
+        console.log("No mission patchsets are available yet.");
+        return;
+      }
+      console.log(`Mission patchsets: ${mission.id}`);
+      for (const patchset of payload) {
+        console.log(`${patchset.id} | ${patchset.owner} | ${patchset.title}`);
+        console.log(`  summary: ${patchset.summary}`);
+        console.log(`  roots: ${patchset.dominantRoots.map((item) => `${item.root} (${item.count})`).join(" | ") || "-"}`);
+        console.log(`  changed: ${patchset.changedPaths.join(", ") || "-"}`);
+        console.log(`  commands: ${patchset.commands.join(" | ") || "-"}`);
+        console.log(`  verification: ${patchset.verificationEvidence.join(" | ") || "-"}`);
+        console.log(`  follow-ups: ${patchset.followUps.join(" | ") || "-"}`);
+        console.log(`  risks: ${patchset.risks.join(" | ") || "-"}`);
+      }
+      return;
+    }
+
+    if (subcommand === "drift") {
+      const payload = buildMissionDriftReport(session, artifacts, mission);
+      if (args.includes("--json")) {
+        console.log(JSON.stringify(payload, null, 2));
+        return;
+      }
+      if (!payload) {
+        console.log("No mission drift report is available.");
+        return;
+      }
+      console.log(`Mission drift: ${mission.id}`);
+      console.log(`Coverage: ${payload.coverageScore}% | covered=${payload.coveredCount} partial=${payload.partialCount} missing=${payload.missingCount}`);
+      console.log(`Summary: ${payload.summary}`);
+      for (const item of payload.items) {
+        console.log(`- [${item.status}] ${item.category} | ${item.title}`);
+        console.log(`  ${item.detail}`);
+        console.log(`  evidence: ${item.evidence.join(" | ") || "-"}`);
+        console.log(`  tasks: ${item.likelyTaskIds.join(", ") || "-"}`);
+        if (item.suggestedAction) {
+          console.log(`  action: ${item.suggestedAction}`);
         }
       }
       return;
@@ -3024,6 +3078,8 @@ async function commandMission(cwd: string, args: string[]): Promise<void> {
     artifacts,
     mission
   );
+  const patchsets = buildMissionPatchsets(session, artifacts, mission);
+  const drift = buildMissionDriftReport(session, artifacts, mission);
 
   if (args.includes("--json")) {
     const graphNodes = resolveMissionGraphNodes(session, mission);
@@ -3031,6 +3087,8 @@ async function commandMission(cwd: string, args: string[]): Promise<void> {
       ...mission,
       selected: session.selectedMissionId === mission.id,
       observability,
+      patchsets,
+      drift,
       graph: {
         nodes: graphNodes,
         lines: renderMissionGraph(graphNodes, {
@@ -3072,6 +3130,10 @@ async function commandMission(cwd: string, args: string[]): Promise<void> {
   }
   console.log(`Spec revisions: ${(mission.specRevisions ?? []).length}`);
   console.log(`Receipts: ${(mission.receiptIds ?? []).length} | Contracts: ${(mission.contractIds ?? []).length}`);
+  console.log(`Patchsets: ${patchsets.length}`);
+  if (drift) {
+    console.log(`Spec drift: coverage=${drift.coverageScore}% | covered=${drift.coveredCount} partial=${drift.partialCount} missing=${drift.missingCount}`);
+  }
   console.log(`Acceptance: ${mission.acceptance.status}`);
   if (mission.spec) {
     console.log(`Audience: ${mission.spec.audience ?? "-"}`);

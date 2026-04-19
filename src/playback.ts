@@ -1,4 +1,5 @@
 import { buildMissionPostmortem } from "./mission-control.ts";
+import { buildMissionDriftReport, buildMissionPatchsets } from "./mission-evidence.ts";
 import { latestMission } from "./missions.ts";
 import { buildMissionAuditReport } from "./quality-court.ts";
 import type { LandReport, MissionPlaybackFrame, SessionRecord, TaskArtifact } from "./types.ts";
@@ -82,6 +83,8 @@ export function buildMissionPlayback(
   const missionArtifacts = artifacts.filter((artifact) => artifact.missionId === mission.id);
   const missionReceipts = (session.receipts ?? []).filter((receipt) => receipt.missionId === mission.id);
   const missionContracts = (session.contracts ?? []).filter((contract) => contract.missionId === mission.id);
+  const missionPatchsets = buildMissionPatchsets(session, artifacts, mission);
+  const missionDrift = buildMissionDriftReport(session, artifacts, mission);
   const audit = buildMissionAuditReport(session, mission, artifacts);
   const frames: MissionPlaybackFrame[] = [
     {
@@ -161,6 +164,17 @@ export function buildMissionPlayback(
     });
   }
 
+  for (const patchset of missionPatchsets) {
+    frames.push({
+      id: `playback-patchset-${patchset.id}`,
+      timestamp: patchset.createdAt,
+      kind: "receipt",
+      title: `Patchset: ${patchset.title}`,
+      detail: `roots=${patchset.dominantRoots.map((root) => `${root.root}(${root.count})`).join(" | ") || "-"} | follow-ups=${patchset.followUps.join(" | ") || "-"} | risks=${patchset.risks.join(" | ") || "-"}`,
+      taskId: patchset.taskId
+    });
+  }
+
   for (const contract of missionContracts) {
     frames.push({
       id: `playback-contract-${contract.id}`,
@@ -180,6 +194,17 @@ export function buildMissionPlayback(
     detail: `${mission.acceptance.summary} | ${(mission.acceptance.criteria ?? []).join(" | ")}`,
     taskId: null
   });
+
+  if (missionDrift) {
+    frames.push({
+      id: `playback-drift-${mission.id}`,
+      timestamp: missionDrift.generatedAt,
+      kind: "mission",
+      title: `Mission drift: ${missionDrift.coverageScore}%`,
+      detail: `${missionDrift.summary} | first-gap=${missionDrift.items.find((item) => item.status !== "covered")?.title ?? "none"}`,
+      taskId: missionDrift.items.find((item) => item.likelyTaskIds.length > 0)?.likelyTaskIds[0] ?? null
+    });
+  }
 
   if (latestLandReport && latestLandReport.sessionId === session.id && mission.landedAt) {
     frames.push({

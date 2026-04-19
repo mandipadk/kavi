@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { explainMissionAcceptanceFailures } from "./acceptance.ts";
 import { buildClaimHotspots } from "./decision-ledger.ts";
+import { buildMissionDriftReport } from "./mission-evidence.ts";
 import { latestMission } from "./missions.ts";
 import { nowIso } from "./paths.ts";
 import { buildOperatorRecommendations } from "./recommendations.ts";
@@ -89,6 +90,7 @@ function buildObjection(
 }
 
 interface MissionAuditContext {
+  session: SessionRecord;
   mission: Mission;
   tasks: TaskSpec[];
   taskIds: Set<string>;
@@ -147,6 +149,7 @@ function buildAuditContext(
   const taskIds = missionTaskIds(session, mission.id);
   const tasks = missionTasks(session, mission.id);
   return {
+    session,
     mission,
     tasks,
     taskIds,
@@ -398,6 +401,7 @@ function buildRiskAuditorRole(context: MissionAuditContext): QualityCourtRoleRep
   const { mission } = context;
   const objections: MissionObjection[] = [];
   const approvals: string[] = [];
+  const drift = buildMissionDriftReport(context.session, context.artifacts, mission);
 
   const highRisks = (mission.risks ?? []).filter((risk) => risk.severity === "high");
   for (const risk of highRisks.slice(0, 2)) {
@@ -429,11 +433,26 @@ function buildRiskAuditorRole(context: MissionAuditContext): QualityCourtRoleRep
     }
   }
 
+  for (const item of drift?.items.filter((entry) => entry.status !== "covered").slice(0, 4) ?? []) {
+    objections.push(buildObjection(mission.id, "risk_auditor", {
+      severity: item.status === "missing" ? "major" : "minor",
+      kind: "drift",
+      title: `Mission coverage drift: ${item.title}`,
+      detail: `${item.detail} Current coverage is ${item.status}.`,
+      evidence: item.evidence,
+      likelyTaskIds: item.likelyTaskIds,
+      suggestedAction: item.suggestedAction
+    }));
+  }
+
   if (highRisks.length === 0) {
     approvals.push("No high-severity mission risks remain.");
   }
   if (((mission.simulation?.issues ?? []).filter((issue) => issue.severity === "high")).length === 0) {
     approvals.push("Mission simulation has no unresolved high-severity warnings.");
+  }
+  if ((drift?.missingCount ?? 0) === 0) {
+    approvals.push("No mission spec or blueprint coverage gaps are currently missing evidence.");
   }
 
   return buildRoleReport("risk_auditor", approvals, objections);

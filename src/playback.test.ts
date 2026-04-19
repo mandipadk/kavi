@@ -185,6 +185,8 @@ test("buildMissionPlayback linearizes mission checkpoints, progress, and landing
   assert.ok(frames.length >= 5);
   assert.equal(frames[0]?.kind, "mission");
   assert.ok(frames.some((frame) => frame.kind === "progress"));
+  assert.ok(frames.some((frame) => frame.title.startsWith("Patchset:")));
+  assert.ok(frames.some((frame) => frame.title.startsWith("Mission drift:")));
   assert.ok(frames.some((frame) => frame.kind === "acceptance"));
   assert.ok(frames.some((frame) => frame.title.startsWith("Quality Court:")));
 });

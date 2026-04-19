@@ -191,6 +191,41 @@ test("upsertMissionReceipt captures commands and follow-ups", () => {
   assert.ok(receipt.followUps.some((value) => /codex/i.test(value)));
 });
 
+test("upsertMissionReceipt does not promote claimed paths into changed paths for failed tasks", () => {
+  const session = buildSession();
+  const mission = createMission(session, "Write docs.");
+  session.missions.push(mission);
+  const task = buildTask({
+    id: "task-failed",
+    missionId: mission.id,
+    title: "Write docs",
+    owner: "claude",
+    nodeKind: "docs",
+    status: "failed",
+    claimedPaths: ["README.md", "QUICKSTART.md"]
+  });
+
+  const receipt = upsertMissionReceipt(
+    session,
+    mission,
+    task,
+    {
+      claimedPaths: ["README.md", "QUICKSTART.md"],
+      progress: []
+    },
+    {
+      summary: "Authentication failed before edits were applied.",
+      status: "failed",
+      blockers: ["auth"],
+      nextRecommendation: null,
+      plan: null,
+      peerMessages: []
+    }
+  );
+
+  assert.deepEqual(receipt.changedPaths, []);
+});
+
 test("agent contracts are created from peer messages and resolved by follow-up work", () => {
   const session = buildSession();
   const mission = createMission(session, "Build backend then hand UI refinement to Claude.");

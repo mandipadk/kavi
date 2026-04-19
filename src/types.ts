@@ -938,6 +938,60 @@ export interface MissionPlaybackFrame {
   taskId: string | null;
 }
 
+export interface MissionPatchsetRoot {
+  root: string;
+  count: number;
+  paths: string[];
+}
+
+export interface MissionPatchset {
+  id: string;
+  missionId: string;
+  receiptId: string | null;
+  taskId: string | null;
+  owner: AgentName | "router";
+  title: string;
+  summary: string;
+  changedPaths: string[];
+  dominantRoots: MissionPatchsetRoot[];
+  commands: string[];
+  verificationEvidence: string[];
+  followUps: string[];
+  risks: string[];
+  createdAt: string;
+}
+
+export type MissionDriftItemStatus = "covered" | "partial" | "missing";
+export type MissionDriftItemCategory =
+  | "deliverable"
+  | "docs"
+  | "service_boundary"
+  | "ui_surface"
+  | "journey";
+
+export interface MissionDriftItem {
+  id: string;
+  missionId: string;
+  category: MissionDriftItemCategory;
+  status: MissionDriftItemStatus;
+  title: string;
+  detail: string;
+  evidence: string[];
+  likelyTaskIds: string[];
+  suggestedAction: string | null;
+}
+
+export interface MissionDriftReport {
+  missionId: string;
+  generatedAt: string;
+  coverageScore: number;
+  coveredCount: number;
+  partialCount: number;
+  missingCount: number;
+  summary: string;
+  items: MissionDriftItem[];
+}
+
 export interface MissionReceipt {
   id: string;
   missionId: string;
@@ -1078,6 +1132,7 @@ export interface MissionObjection {
   kind:
     | "acceptance"
     | "contract"
+    | "drift"
     | "follow_up"
     | "overlap"
     | "verification"

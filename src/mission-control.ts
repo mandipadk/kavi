@@ -326,6 +326,19 @@ function extractVerificationEvidence(progress: TaskProgressEntry[], envelope: Ag
   return unique(evidence).slice(0, 8);
 }
 
+function extractChangedPaths(
+  task: TaskSpec,
+  artifact: Pick<TaskArtifact, "progress" | "claimedPaths"> | null
+): string[] {
+  const runtimePaths = unique((artifact?.progress ?? []).flatMap((entry) => entry.paths));
+  if (runtimePaths.length > 0) {
+    return runtimePaths;
+  }
+  return task.status === "completed"
+    ? unique([...(artifact?.claimedPaths ?? []), ...task.claimedPaths])
+    : [];
+}
+
 function summarizeAssumptions(task: TaskSpec, envelope: AgentTurnEnvelope | null): string[] {
   const assumptions: string[] = [];
   if (task.routeReason?.trim()) {
@@ -357,7 +370,7 @@ export function upsertMissionReceipt(
     outcome: task.status === "failed" ? "failed" : task.status === "blocked" ? "blocked" : "completed",
     title: task.title,
     summary: task.summary ?? envelope?.summary ?? task.prompt,
-    changedPaths: unique([...(artifact?.claimedPaths ?? []), ...task.claimedPaths]),
+    changedPaths: extractChangedPaths(task, artifact),
     commands: extractCommandsFromProgress(progress),
     verificationEvidence: extractVerificationEvidence(progress, envelope),
     assumptions: summarizeAssumptions(task, envelope),
