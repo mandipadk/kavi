@@ -583,7 +583,11 @@ function buildIntegrationAuditorRole(context: MissionAuditContext): QualityCourt
   for (const task of failedTasks.slice(0, 3)) {
     const taskArtifactSummaries = artifacts
       .filter((artifact) => artifact.taskId === task.id)
-      .flatMap((artifact) => [artifact.error ?? "", artifact.summary ?? ""]);
+      .flatMap((artifact) => [
+        artifact.error ?? "",
+        artifact.summary ?? "",
+        ...(artifact.runtimeTrace ?? []).slice(-6).map((entry) => entry.summary)
+      ]);
     objections.push(buildObjection(mission.id, "integration_auditor", {
       severity: "critical",
       kind: "receipt",

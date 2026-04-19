@@ -143,6 +143,19 @@ test("buildMissionPlayback linearizes mission checkpoints, progress, and landing
         createdAt: "2026-04-07T00:01:30.000Z"
       }
     ],
+    runtimeTrace: [
+      {
+        id: "trace-1",
+        createdAt: "2026-04-07T00:01:20.000Z",
+        provider: "codex",
+        source: "delta",
+        eventName: "file-change",
+        semanticKind: "editing",
+        summary: "Codex started editing main.go.",
+        detail: "assistant delta indicates edits to main.go",
+        paths: ["main.go"]
+      }
+    ],
     attempts: [
       {
         id: "attempt-1",
@@ -185,6 +198,7 @@ test("buildMissionPlayback linearizes mission checkpoints, progress, and landing
   assert.ok(frames.length >= 5);
   assert.equal(frames[0]?.kind, "mission");
   assert.ok(frames.some((frame) => frame.kind === "progress"));
+  assert.ok(frames.some((frame) => frame.title.includes("trace | editing")));
   assert.ok(frames.some((frame) => frame.title.startsWith("Patchset:")));
   assert.ok(frames.some((frame) => frame.title.startsWith("Mission drift:")));
   assert.ok(frames.some((frame) => frame.kind === "acceptance"));

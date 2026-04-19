@@ -3543,6 +3543,7 @@ async function commandReceipts(cwd: string, args: string[]): Promise<void> {
         changedPaths: receipt.changedPaths,
         commands: receipt.commands,
         verificationEvidence: receipt.verificationEvidence,
+        runtimeHighlights: receipt.runtimeHighlights,
         assumptions: receipt.assumptions,
         followUps: receipt.followUps,
         risks: receipt.risks
@@ -3558,6 +3559,7 @@ async function commandReceipts(cwd: string, args: string[]): Promise<void> {
     for (const item of timeline) {
       console.log(`${item.timestamp} | ${item.owner} | ${item.outcome} | ${item.title}`);
       console.log(`  changed: ${item.changedPaths.join(", ") || "-"}`);
+      console.log(`  traces: ${item.runtimeHighlights.join(" | ") || "-"}`);
       console.log(`  verification: ${item.verificationEvidence.join(" | ") || "-"}`);
       console.log(`  follow-ups: ${item.followUps.join(" | ") || "-"}`);
     }
@@ -3579,6 +3581,7 @@ async function commandReceipts(cwd: string, args: string[]): Promise<void> {
     console.log(`  summary: ${receipt.summary}`);
     console.log(`  changed: ${receipt.changedPaths.join(", ") || "-"}`);
     console.log(`  commands: ${receipt.commands.join(" | ") || "-"}`);
+    console.log(`  traces: ${receipt.runtimeHighlights.join(" | ") || "-"}`);
     console.log(`  verification: ${receipt.verificationEvidence.join(" | ") || "-"}`);
     console.log(`  assumptions: ${receipt.assumptions.join(" | ") || "-"}`);
     console.log(`  follow-ups: ${receipt.followUps.join(" | ") || "-"}`);
@@ -5785,6 +5788,25 @@ async function commandTaskOutput(cwd: string, args: string[]): Promise<void> {
           `  runtime: provider=${entry.provider ?? "-"} event=${entry.eventName ?? "-"} source=${entry.source ?? "-"}`
         );
       }
+    }
+  }
+  console.log("Runtime Trace:");
+  if ((artifact.runtimeTrace ?? []).length === 0) {
+    console.log("-");
+  } else {
+    for (const entry of (artifact.runtimeTrace ?? []).slice(-12)) {
+      console.log(
+        `${entry.createdAt} | ${entry.semanticKind ?? "runtime"} | ${entry.summary}`
+      );
+      if (entry.detail && entry.detail !== entry.summary) {
+        console.log(`  detail: ${entry.detail}`);
+      }
+      if (entry.paths.length > 0) {
+        console.log(`  paths: ${entry.paths.join(", ")}`);
+      }
+      console.log(
+        `  runtime: provider=${entry.provider ?? "-"} event=${entry.eventName ?? "-"} source=${entry.source ?? "-"}`
+      );
     }
   }
   console.log("Raw Output:");

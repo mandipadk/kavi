@@ -78,6 +78,7 @@ test("task artifacts can be written, loaded, and listed", async () => {
     finishedAt: "2026-03-24T00:00:01.000Z",
     nextRecommendation: null,
     progress: [],
+    runtimeTrace: [],
     attempts: []
   };
 
@@ -125,6 +126,7 @@ test("task artifacts normalize missing progress to an empty array", async () => 
     finishedAt: "2026-03-24T00:00:01.000Z",
     nextRecommendation: null,
     progress: [],
+    runtimeTrace: [],
     attempts: []
   });
 
@@ -136,6 +138,7 @@ test("task artifacts normalize missing progress to an empty array", async () => 
   const loaded = await loadTaskArtifact(paths, "task-legacy");
   assert.ok(loaded);
   assert.deepEqual(loaded.progress, []);
+  assert.deepEqual(loaded.runtimeTrace, []);
   assert.deepEqual(loaded.attempts, []);
 });
 
@@ -186,11 +189,25 @@ test("task artifacts preserve semantic progress kinds", async () => {
         source: "transcript"
       }
     ],
+    runtimeTrace: [
+      {
+        id: "trace-1",
+        createdAt: "2026-03-24T00:00:25.000Z",
+        provider: "claude",
+        source: "transcript",
+        eventName: "planning",
+        semanticKind: "planning",
+        summary: "Claude planning: refine the dashboard flow before editing the page shell.",
+        detail: "assistant planning step from transcript",
+        paths: ["apps/web/app/page.tsx"]
+      }
+    ],
     attempts: []
   });
 
   const loaded = await loadTaskArtifact(paths, "task-semantic");
   assert.equal(loaded?.progress[0]?.semanticKind, "planning");
+  assert.equal(loaded?.runtimeTrace[0]?.semanticKind, "planning");
 });
 
 test("task artifacts preserve null finishedAt for running work", async () => {
@@ -228,6 +245,7 @@ test("task artifacts preserve null finishedAt for running work", async () => {
     finishedAt: null,
     nextRecommendation: null,
     progress: [],
+    runtimeTrace: [],
     attempts: [
       {
         id: "attempt-1",

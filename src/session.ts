@@ -154,6 +154,9 @@ export async function loadSessionRecord(paths: AppPaths): Promise<SessionRecord>
             verificationEvidence: Array.isArray(receipt.verificationEvidence)
               ? receipt.verificationEvidence.map((value) => String(value))
               : [],
+            runtimeHighlights: Array.isArray(receipt.runtimeHighlights)
+              ? receipt.runtimeHighlights.map((value) => String(value))
+              : [],
             assumptions: Array.isArray(receipt.assumptions)
               ? receipt.assumptions.map((value) => String(value))
               : [],

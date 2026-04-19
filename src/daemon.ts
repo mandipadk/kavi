@@ -1745,7 +1745,13 @@ export class KaviDaemon {
             payload.source === "hook" ||
             payload.source === "transcript"
               ? payload.source
-              : null
+              : null,
+          detail:
+            typeof payload.detail === "string"
+              ? payload.detail
+              : typeof payload.raw === "string"
+                ? payload.raw
+                : null
         }
       );
     }
@@ -2536,6 +2542,7 @@ export class KaviDaemon {
       eventName?: string | null;
       semanticKind?: ProviderSemanticKind | null;
       source?: TaskProgressEntry["source"] | null;
+      detail?: string | null;
     } = {}
   ): Promise<void> {
     await this.runMutation(async () => {
@@ -2574,6 +2581,31 @@ export class KaviDaemon {
         source: metadata.source ?? null
       };
       artifact.progress.push(progressEntry);
+      artifact.runtimeTrace = Array.isArray(artifact.runtimeTrace) ? artifact.runtimeTrace : [];
+      const traceEntry = {
+        id: `trace-${Date.now()}`,
+        createdAt: progressEntry.createdAt,
+        provider: metadata.provider ?? null,
+        source: metadata.source ?? null,
+        eventName: metadata.eventName ?? null,
+        semanticKind: metadata.semanticKind ?? null,
+        summary,
+        detail: metadata.detail ?? summary,
+        paths: [...paths]
+      };
+      const lastTrace = artifact.runtimeTrace.at(-1) ?? null;
+      if (
+        !lastTrace ||
+        lastTrace.summary !== traceEntry.summary ||
+        lastTrace.detail !== traceEntry.detail ||
+        (lastTrace.semanticKind ?? null) !== (traceEntry.semanticKind ?? null) ||
+        lastTrace.paths.join("\n") !== traceEntry.paths.join("\n")
+      ) {
+        artifact.runtimeTrace.push(traceEntry);
+        if (artifact.runtimeTrace.length > 400) {
+          artifact.runtimeTrace = artifact.runtimeTrace.slice(-400);
+        }
+      }
       artifact.retryCount = task.retryCount;
       artifact.maxRetries = task.maxRetries;
       artifact.lastFailureSummary = task.lastFailureSummary;
@@ -2648,7 +2680,8 @@ export class KaviDaemon {
             changedPaths,
             summarizeProgressPaths(changedPaths),
             {
-              source: "worktree"
+              source: "worktree",
+              detail: changedPaths.join("\n")
             }
           );
           return;
@@ -2662,7 +2695,8 @@ export class KaviDaemon {
         lastHeartbeatAt = now;
         if (now - lastMeaningfulAt >= 60_000) {
           await this.appendTaskProgress(task.id, "stalled", changedPaths, "Task is still running but no new worktree changes have appeared for about a minute.", {
-            source: "worktree"
+            source: "worktree",
+            detail: changedPaths.join("\n")
           });
           return;
         }
@@ -2673,7 +2707,8 @@ export class KaviDaemon {
           changedPaths,
           changedPaths.length > 0 ? `Task is still running with ${changedPaths.length} changed path(s) in progress.` : "Task is still running; worktree output has not appeared yet.",
           {
-            source: "worktree"
+            source: "worktree",
+            detail: changedPaths.join("\n")
           }
         );
       })().catch(() => {});
@@ -2747,6 +2782,7 @@ export class KaviDaemon {
         envelope: null,
         reviewNotes: reviewNotesForTask(this.session, task.id),
         progress: existingArtifact?.progress ?? [],
+        runtimeTrace: existingArtifact?.runtimeTrace ?? [],
         attempts: startTaskAttempt(
           existingArtifact?.attempts ?? [],
           startedAt,
@@ -2839,7 +2875,8 @@ export class KaviDaemon {
         {
           provider: taskSnapshot.owner,
           eventName: "runtime",
-          source: "stderr"
+          source: "stderr",
+          detail: normalized
         }
       );
     };
@@ -2855,7 +2892,8 @@ export class KaviDaemon {
           provider: event.provider,
           eventName: event.eventName,
           semanticKind: event.semanticKind,
-          source: event.source
+          source: event.source,
+          detail: chunk
         });
       }
 
@@ -2880,7 +2918,8 @@ export class KaviDaemon {
           provider: event.provider,
           eventName: event.eventName,
           semanticKind: event.semanticKind,
-          source: event.source
+          source: event.source,
+          detail: chunk
         });
       }
     };
@@ -2945,7 +2984,8 @@ export class KaviDaemon {
             provider: event.provider,
             eventName: event.eventName,
             semanticKind: event.semanticKind,
-            source: event.source
+            source: event.source,
+            detail: line
           });
         }
       }
@@ -2985,7 +3025,8 @@ export class KaviDaemon {
               provider: event.provider,
               eventName: event.eventName,
               semanticKind: event.semanticKind,
-              source: event.source
+              source: event.source,
+              detail: event.summary
             });
           },
           signal: taskAbortController.signal
@@ -3125,6 +3166,7 @@ export class KaviDaemon {
         }
         const existingArtifact = await loadTaskArtifact(this.paths, task.id);
         const artifactProgress = existingArtifact?.progress ?? [];
+        const artifactRuntimeTrace = existingArtifact?.runtimeTrace ?? [];
         const artifactClaimedPaths = uniqueArtifactPaths(
           existingArtifact?.claimedPaths ?? [],
           task.claimedPaths
@@ -3138,6 +3180,7 @@ export class KaviDaemon {
             task,
             {
               progress: artifactProgress,
+              runtimeTrace: artifactRuntimeTrace,
               claimedPaths: artifactClaimedPaths
             },
             envelope
@@ -3182,6 +3225,7 @@ export class KaviDaemon {
           envelope,
           reviewNotes: reviewNotesForTask(this.session, task.id),
           progress: existingArtifact?.progress ?? [],
+          runtimeTrace: existingArtifact?.runtimeTrace ?? [],
           attempts: finalizeTaskAttempt(
             existingArtifact?.attempts ?? [],
             task.status === "completed" ? "completed" : "blocked",
@@ -3348,6 +3392,7 @@ export class KaviDaemon {
             envelope: null,
             reviewNotes: reviewNotesForTask(this.session, task.id),
             progress: existingArtifact?.progress ?? [],
+            runtimeTrace: existingArtifact?.runtimeTrace ?? [],
             attempts: finalizeTaskAttempt(
               existingArtifact?.attempts ?? [],
               "retrying",
@@ -3420,6 +3465,7 @@ export class KaviDaemon {
             task,
             {
               progress: existingArtifact?.progress ?? [],
+              runtimeTrace: existingArtifact?.runtimeTrace ?? [],
               claimedPaths: uniqueArtifactPaths(existingArtifact?.claimedPaths ?? [], task.claimedPaths)
             },
             null
@@ -3486,6 +3532,7 @@ export class KaviDaemon {
           envelope: null,
           reviewNotes: reviewNotesForTask(this.session, task.id),
           progress: existingArtifact?.progress ?? [],
+          runtimeTrace: existingArtifact?.runtimeTrace ?? [],
           attempts: finalizeTaskAttempt(
             existingArtifact?.attempts ?? [],
             "failed",

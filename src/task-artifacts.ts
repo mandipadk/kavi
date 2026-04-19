@@ -167,6 +167,57 @@ function normalizeArtifact(artifact: TaskArtifact): TaskArtifact {
               : null
         }))
       : [],
+    runtimeTrace: Array.isArray((artifact as TaskArtifact & { runtimeTrace?: unknown }).runtimeTrace)
+      ? ((artifact as TaskArtifact & { runtimeTrace?: unknown }).runtimeTrace as unknown[]).map((entry, index) => {
+          const item = entry && typeof entry === "object" && !Array.isArray(entry)
+            ? (entry as Record<string, unknown>)
+            : {};
+          return {
+            id: String(item.id ?? `trace-${index + 1}`),
+            createdAt: typeof item.createdAt === "string" ? item.createdAt : artifact.startedAt,
+            provider:
+              item.provider === "codex" || item.provider === "claude" || item.provider === "node"
+                ? item.provider
+                : null,
+            source:
+              item.source === "notification" ||
+              item.source === "stderr" ||
+              item.source === "stdout" ||
+              item.source === "delta" ||
+              item.source === "hook" ||
+              item.source === "transcript" ||
+              item.source === "worktree"
+                ? item.source
+                : null,
+            eventName: typeof item.eventName === "string" ? item.eventName : null,
+            semanticKind:
+              item.semanticKind === "planning" ||
+              item.semanticKind === "reasoning" ||
+              item.semanticKind === "inspection" ||
+              item.semanticKind === "scaffold" ||
+              item.semanticKind === "editing" ||
+              item.semanticKind === "command" ||
+              item.semanticKind === "verification" ||
+              item.semanticKind === "blocker" ||
+              item.semanticKind === "approval" ||
+              item.semanticKind === "handoff" ||
+              item.semanticKind === "contract" ||
+              item.semanticKind === "review" ||
+              item.semanticKind === "tool" ||
+              item.semanticKind === "session" ||
+              item.semanticKind === "notification" ||
+              item.semanticKind === "runtime" ||
+              item.semanticKind === "failure" ||
+              item.semanticKind === "completion" ||
+              item.semanticKind === "artifact"
+                ? item.semanticKind
+                : null,
+            summary: typeof item.summary === "string" ? item.summary : "",
+            detail: typeof item.detail === "string" ? item.detail : null,
+            paths: Array.isArray(item.paths) ? item.paths.map((value) => String(value)) : []
+          };
+        })
+      : [],
     attempts: Array.isArray(artifact.attempts)
       ? artifact.attempts.map((attempt, index) => ({
           id: String(attempt.id ?? `attempt-${index + 1}`),

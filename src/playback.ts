@@ -141,6 +141,18 @@ export function buildMissionPlayback(
       });
     }
 
+    for (const trace of artifact.runtimeTrace ?? []) {
+      const semanticLabel = trace.semanticKind ? ` | ${trace.semanticKind}` : "";
+      frames.push({
+        id: `playback-trace-${trace.id}`,
+        timestamp: trace.createdAt,
+        kind: "progress",
+        title: `${artifact.title} trace${semanticLabel}`,
+        detail: `${trace.provider ?? artifact.owner}${trace.eventName ? `:${trace.eventName}` : ""}${trace.source ? `@${trace.source}` : ""} | ${trace.detail ?? trace.summary}`,
+        taskId: artifact.taskId
+      });
+    }
+
     if (artifact.finishedAt) {
       frames.push({
         id: `playback-finish-${artifact.taskId}`,
@@ -159,7 +171,7 @@ export function buildMissionPlayback(
       timestamp: receipt.createdAt,
       kind: "receipt",
       title: `${receipt.owner} receipt: ${receipt.title}`,
-      detail: `${receipt.outcome} | commands=${receipt.commands.join(" | ") || "-"} | changed=${receipt.changedPaths.join(", ") || "-"}`,
+      detail: `${receipt.outcome} | commands=${receipt.commands.join(" | ") || "-"} | traces=${receipt.runtimeHighlights.join(" | ") || "-"} | changed=${receipt.changedPaths.join(", ") || "-"}`,
       taskId: receipt.taskId
     });
   }

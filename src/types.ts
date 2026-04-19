@@ -333,6 +333,7 @@ export interface TaskArtifact {
   envelope: AgentTurnEnvelope | null;
   reviewNotes: ReviewNote[];
   progress: TaskProgressEntry[];
+  runtimeTrace: TaskRuntimeTraceEntry[];
   attempts: TaskAttemptRecord[];
   startedAt: string;
   finishedAt: string | null;
@@ -1020,6 +1021,7 @@ export interface MissionReceipt {
   changedPaths: string[];
   commands: string[];
   verificationEvidence: string[];
+  runtimeHighlights: string[];
   assumptions: string[];
   followUps: string[];
   risks: string[];
@@ -1292,6 +1294,18 @@ export interface TaskProgressEntry {
   eventName?: string | null;
   semanticKind?: ProviderSemanticKind | null;
   source?: "notification" | "stderr" | "stdout" | "delta" | "worktree" | "hook" | "transcript" | null;
+}
+
+export interface TaskRuntimeTraceEntry {
+  id: string;
+  createdAt: string;
+  provider: AgentName | "node" | null;
+  source: "notification" | "stderr" | "stdout" | "delta" | "worktree" | "hook" | "transcript" | null;
+  eventName: string | null;
+  semanticKind: ProviderSemanticKind | null;
+  summary: string;
+  detail: string | null;
+  paths: string[];
 }
 
 export type ProviderSemanticKind =

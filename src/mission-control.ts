@@ -326,6 +326,28 @@ function extractVerificationEvidence(progress: TaskProgressEntry[], envelope: Ag
   return unique(evidence).slice(0, 8);
 }
 
+function extractRuntimeHighlights(
+  artifact: Pick<TaskArtifact, "runtimeTrace" | "progress"> | null
+): string[] {
+  const traceHighlights = (artifact?.runtimeTrace ?? [])
+    .filter((entry) =>
+      entry.semanticKind === "planning" ||
+      entry.semanticKind === "editing" ||
+      entry.semanticKind === "command" ||
+      entry.semanticKind === "verification" ||
+      entry.semanticKind === "blocker" ||
+      entry.semanticKind === "contract" ||
+      entry.semanticKind === "handoff" ||
+      entry.semanticKind === "completion" ||
+      entry.semanticKind === "failure"
+    )
+    .map((entry) => normalizeText(entry.summary));
+  if (traceHighlights.length > 0) {
+    return unique(traceHighlights).slice(0, 8);
+  }
+  return unique((artifact?.progress ?? []).map((entry) => normalizeText(entry.summary))).slice(0, 8);
+}
+
 function extractChangedPaths(
   task: TaskSpec,
   artifact: Pick<TaskArtifact, "progress" | "claimedPaths"> | null
@@ -354,7 +376,7 @@ export function upsertMissionReceipt(
   session: SessionRecord,
   mission: Mission,
   task: TaskSpec,
-  artifact: Pick<TaskArtifact, "progress" | "claimedPaths"> | null,
+  artifact: Pick<TaskArtifact, "progress" | "claimedPaths" | "runtimeTrace"> | null,
   envelope: AgentTurnEnvelope | null
 ): MissionReceipt {
   session.receipts = Array.isArray(session.receipts) ? session.receipts : [];
@@ -373,6 +395,7 @@ export function upsertMissionReceipt(
     changedPaths: extractChangedPaths(task, artifact),
     commands: extractCommandsFromProgress(progress),
     verificationEvidence: extractVerificationEvidence(progress, envelope),
+    runtimeHighlights: extractRuntimeHighlights(artifact),
     assumptions: summarizeAssumptions(task, envelope),
     followUps: unique([
       ...(envelope?.peerMessages.map((message) => `${message.to}: ${message.subject}`) ?? []),

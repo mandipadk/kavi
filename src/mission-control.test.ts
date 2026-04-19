@@ -159,7 +159,7 @@ test("upsertMissionReceipt captures commands and follow-ups", () => {
     nextRecommendation: "Ask codex to verify the CLI run flow.",
     claimedPaths: ["README.md", "QUICKSTART.md"]
   });
-  const artifact: Pick<TaskArtifact, "progress" | "claimedPaths"> = {
+  const artifact: Pick<TaskArtifact, "progress" | "claimedPaths" | "runtimeTrace"> = {
     claimedPaths: ["README.md", "QUICKSTART.md"],
     progress: [
       {
@@ -171,6 +171,19 @@ test("upsertMissionReceipt captures commands and follow-ups", () => {
         provider: "claude",
         eventName: "verification",
         source: "hook"
+      }
+    ],
+    runtimeTrace: [
+      {
+        id: "trace-1",
+        createdAt: "2026-04-10T00:00:40.000Z",
+        provider: "claude",
+        source: "transcript",
+        eventName: "file-change",
+        semanticKind: "editing",
+        summary: "Claude prepared edits for QUICKSTART.md.",
+        detail: "assistant decided to update QUICKSTART.md and README.md",
+        paths: ["QUICKSTART.md", "README.md"]
       }
     ]
   };
@@ -187,6 +200,7 @@ test("upsertMissionReceipt captures commands and follow-ups", () => {
 
   assert.equal(session.receipts?.length, 1);
   assert.ok(receipt.commands.includes("npm test"));
+  assert.ok(receipt.runtimeHighlights.some((value) => /QUICKSTART|edit/i.test(value)));
   assert.ok(receipt.verificationEvidence.some((value) => /verified|test/i.test(value)));
   assert.ok(receipt.followUps.some((value) => /codex/i.test(value)));
 });
@@ -211,7 +225,8 @@ test("upsertMissionReceipt does not promote claimed paths into changed paths for
     task,
     {
       claimedPaths: ["README.md", "QUICKSTART.md"],
-      progress: []
+      progress: [],
+      runtimeTrace: []
     },
     {
       summary: "Authentication failed before edits were applied.",
