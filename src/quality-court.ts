@@ -10,6 +10,7 @@ import type {
   Mission,
   MissionAuditReport,
   MissionObjection,
+  QualityCourtEvidencePack,
   QualityCourtRole,
   QualityCourtRoleReport,
   SessionRecord,
@@ -121,7 +122,8 @@ function buildRoleScore(objections: MissionObjection[]): number {
 function buildRoleReport(
   role: QualityCourtRole,
   approvals: string[],
-  objections: MissionObjection[]
+  objections: MissionObjection[],
+  evidencePacks: QualityCourtEvidencePack[]
 ): QualityCourtRoleReport {
   const verdict = buildRoleVerdict(objections);
   const roleLabel = role.replaceAll("_", " ");
@@ -137,7 +139,27 @@ function buildRoleReport(
     score: buildRoleScore(objections),
     summary,
     approvals: unique(approvals),
-    objections
+    objections,
+    evidencePacks
+  };
+}
+
+function buildEvidencePack(
+  missionId: string,
+  role: QualityCourtRole,
+  seed: Omit<QualityCourtEvidencePack, "id" | "missionId" | "role">
+): QualityCourtEvidencePack {
+  return {
+    id: `evidence-${randomUUID()}`,
+    missionId,
+    role,
+    ...seed,
+    highlights: unique(seed.highlights),
+    evidence: unique(seed.evidence),
+    taskIds: unique(seed.taskIds),
+    receiptIds: unique(seed.receiptIds),
+    contractIds: unique(seed.contractIds),
+    checkIds: unique(seed.checkIds)
   };
 }
 
@@ -168,6 +190,7 @@ function buildVerifierRole(context: MissionAuditContext): QualityCourtRoleReport
   const { mission, receipts, failureExplanations } = context;
   const objections: MissionObjection[] = [];
   const approvals: string[] = [];
+  const evidencePacks: QualityCourtEvidencePack[] = [];
 
   if (mission.acceptance.status === "failed") {
     if (failureExplanations.length > 0) {
@@ -181,6 +204,22 @@ function buildVerifierRole(context: MissionAuditContext): QualityCourtRoleReport
           likelyTaskIds: explanation.likelyTaskIds,
           suggestedAction: "kavi verify latest --explain"
         }));
+        evidencePacks.push(buildEvidencePack(mission.id, "verifier", {
+          stance: "objection",
+          severity: "critical",
+          kind: "acceptance_failure",
+          title: explanation.title,
+          summary: explanation.summary,
+          highlights: explanation.repairFocus,
+          evidence: explanation.evidence,
+          taskIds: explanation.likelyTaskIds,
+          receiptIds: [],
+          contractIds: [],
+          checkIds: mission.acceptance.checks
+            .filter((check) => explanation.evidence.some((item) => check.title === item || `${check.kind}:${check.title}` === item))
+            .map((check) => check.id),
+          suggestedAction: "kavi verify latest --explain"
+        }));
       }
     } else {
       for (const pack of (mission.acceptance.failurePacks ?? []).slice(0, 4)) {
@@ -191,6 +230,20 @@ function buildVerifierRole(context: MissionAuditContext): QualityCourtRoleReport
           detail: pack.summary,
           evidence: unique([...pack.evidence, ...pack.repairFocus]),
           likelyTaskIds: pack.likelyTaskIds,
+          suggestedAction: "kavi verify latest --explain"
+        }));
+        evidencePacks.push(buildEvidencePack(mission.id, "verifier", {
+          stance: "objection",
+          severity: "critical",
+          kind: "acceptance_failure",
+          title: pack.title,
+          summary: pack.summary,
+          highlights: pack.repairFocus,
+          evidence: pack.evidence,
+          taskIds: pack.likelyTaskIds,
+          receiptIds: [],
+          contractIds: [],
+          checkIds: [pack.checkId],
           suggestedAction: "kavi verify latest --explain"
         }));
       }
@@ -213,6 +266,20 @@ function buildVerifierRole(context: MissionAuditContext): QualityCourtRoleReport
       likelyTaskIds: [],
       suggestedAction: "kavi verify latest"
     }));
+    evidencePacks.push(buildEvidencePack(mission.id, "verifier", {
+      stance: "objection",
+      severity: "critical",
+      kind: "verification_gap",
+      title: "Acceptance has not been verified",
+      summary: "Mission execution is idle, but the acceptance pack is still pending.",
+      highlights: mission.acceptance.criteria,
+      evidence: mission.acceptance.checks.map((check) => `${check.kind}:${check.title}`),
+      taskIds: [],
+      receiptIds: [],
+      contractIds: [],
+      checkIds: mission.acceptance.checks.map((check) => check.id),
+      suggestedAction: "kavi verify latest"
+    }));
   }
 
   const completedReceipts = receipts.filter((receipt) => receipt.outcome === "completed");
@@ -229,6 +296,20 @@ function buildVerifierRole(context: MissionAuditContext): QualityCourtRoleReport
       detail: "Mission receipts do not currently capture any concrete verification signals, which weakens the audit trail.",
       evidence: completedReceipts.map((receipt) => receipt.title),
       likelyTaskIds: completedReceipts.map((receipt) => receipt.taskId),
+      suggestedAction: "kavi verify --explain"
+    }));
+    evidencePacks.push(buildEvidencePack(mission.id, "verifier", {
+      stance: "objection",
+      severity: "major",
+      kind: "verification_gap",
+      title: "Receipt-level verification evidence is missing",
+      summary: "Completed mission receipts exist, but they do not capture any verification evidence.",
+      highlights: completedReceipts.map((receipt) => receipt.title),
+      evidence: completedReceipts.flatMap((receipt) => receipt.commands),
+      taskIds: completedReceipts.map((receipt) => receipt.taskId),
+      receiptIds: completedReceipts.map((receipt) => receipt.id),
+      contractIds: [],
+      checkIds: [],
       suggestedAction: "kavi verify --explain"
     }));
   }
@@ -251,6 +332,22 @@ function buildVerifierRole(context: MissionAuditContext): QualityCourtRoleReport
       likelyTaskIds: [],
       suggestedAction: "kavi accept latest"
     }));
+    evidencePacks.push(buildEvidencePack(mission.id, "verifier", {
+      stance: "objection",
+      severity: mission.acceptance.status === "passed" ? "major" : "minor",
+      kind: "verification_gap",
+      title: "Docs expectations still lack a passing proof",
+      summary: "Mission contract docs expectations exist, but no docs check has passed yet.",
+      highlights: mission.contract?.docsExpectations ?? [],
+      evidence: mission.acceptance.checks
+        .filter((check) => check.kind === "docs")
+        .map((check) => `${check.status}:${check.title}`),
+      taskIds: [],
+      receiptIds: [],
+      contractIds: [],
+      checkIds: mission.acceptance.checks.filter((check) => check.kind === "docs").map((check) => check.id),
+      suggestedAction: "kavi accept latest"
+    }));
   }
 
   if (mission.acceptance.status === "passed") {
@@ -261,15 +358,30 @@ function buildVerifierRole(context: MissionAuditContext): QualityCourtRoleReport
   }
   if (completedVerificationEvidence.length > 0) {
     approvals.push("Receipt-level verification evidence is present.");
+    evidencePacks.push(buildEvidencePack(mission.id, "verifier", {
+      stance: "approval",
+      severity: null,
+      kind: "verification_receipts",
+      title: "Verification evidence is attached to mission receipts",
+      summary: "Completed receipts include concrete verification evidence.",
+      highlights: completedVerificationEvidence.slice(0, 6),
+      evidence: completedReceipts.flatMap((receipt) => receipt.verificationEvidence),
+      taskIds: completedReceipts.map((receipt) => receipt.taskId),
+      receiptIds: completedReceipts.map((receipt) => receipt.id),
+      contractIds: [],
+      checkIds: mission.acceptance.checks.filter((check) => check.status === "passed").map((check) => check.id),
+      suggestedAction: null
+    }));
   }
 
-  return buildRoleReport("verifier", approvals, objections);
+  return buildRoleReport("verifier", approvals, objections, evidencePacks);
 }
 
 function buildContractAuditorRole(context: MissionAuditContext): QualityCourtRoleReport {
   const { mission, contracts, followUps } = context;
   const objections: MissionObjection[] = [];
   const approvals: string[] = [];
+  const evidencePacks: QualityCourtEvidencePack[] = [];
 
   const blockingContracts = contracts.filter(
     (contract) => contract.status === "open" && contract.dependencyImpact === "blocking"
@@ -288,6 +400,20 @@ function buildContractAuditorRole(context: MissionAuditContext): QualityCourtRol
       likelyTaskIds: unique([contract.sourceTaskId, contract.resolvedByTaskId]),
       suggestedAction: `kavi contract-apply ${contract.id}`
     }));
+    evidencePacks.push(buildEvidencePack(mission.id, "contract_auditor", {
+      stance: "objection",
+      severity: "critical",
+      kind: "contract_chain",
+      title: contract.title,
+      summary: contract.detail,
+      highlights: contract.acceptanceExpectations,
+      evidence: [...contract.requiredArtifacts, ...contract.claimedPaths],
+      taskIds: [contract.sourceTaskId, contract.resolvedByTaskId],
+      receiptIds: [],
+      contractIds: [contract.id],
+      checkIds: [],
+      suggestedAction: `kavi contract-apply ${contract.id}`
+    }));
   }
 
   const sidecarContracts = contracts.filter(
@@ -303,6 +429,20 @@ function buildContractAuditorRole(context: MissionAuditContext): QualityCourtRol
       likelyTaskIds: unique([contract.sourceTaskId, contract.resolvedByTaskId]),
       suggestedAction: `kavi contract-apply ${contract.id}`
     }));
+    evidencePacks.push(buildEvidencePack(mission.id, "contract_auditor", {
+      stance: "objection",
+      severity: "major",
+      kind: "contract_chain",
+      title: contract.title,
+      summary: contract.detail,
+      highlights: contract.acceptanceExpectations,
+      evidence: [...contract.requiredArtifacts, ...contract.claimedPaths],
+      taskIds: [contract.sourceTaskId, contract.resolvedByTaskId],
+      receiptIds: [],
+      contractIds: [contract.id],
+      checkIds: [],
+      suggestedAction: `kavi contract-apply ${contract.id}`
+    }));
   }
 
   for (const recommendation of followUps.slice(0, 4)) {
@@ -315,6 +455,23 @@ function buildContractAuditorRole(context: MissionAuditContext): QualityCourtRol
       likelyTaskIds: recommendation.taskIds,
       suggestedAction: `kavi recommend-apply ${recommendation.id}`
     }));
+    evidencePacks.push(buildEvidencePack(mission.id, "contract_auditor", {
+      stance: "objection",
+      severity: "major",
+      kind: "follow_up_queue",
+      title: recommendation.title,
+      summary: recommendation.summary,
+      highlights: recommendation.openFollowUpTaskIds,
+      evidence: unique([
+        ...recommendation.taskIds,
+        ...Object.values(recommendation.metadata ?? {}).filter((value): value is string => typeof value === "string")
+      ]),
+      taskIds: recommendation.taskIds,
+      receiptIds: [],
+      contractIds: [],
+      checkIds: [],
+      suggestedAction: `kavi recommend-apply ${recommendation.id}`
+    }));
   }
 
   if (blockingContracts.length === 0) {
@@ -325,15 +482,37 @@ function buildContractAuditorRole(context: MissionAuditContext): QualityCourtRol
   }
   if (contracts.some((contract) => contract.status === "resolved")) {
     approvals.push("Previously opened agent contracts have been resolved.");
+    evidencePacks.push(buildEvidencePack(mission.id, "contract_auditor", {
+      stance: "approval",
+      severity: null,
+      kind: "contract_chain",
+      title: "Resolved agent contracts are on record",
+      summary: "This mission already resolved at least one typed contract between agents.",
+      highlights: contracts
+        .filter((contract) => contract.status === "resolved")
+        .map((contract) => contract.title)
+        .slice(0, 6),
+      evidence: contracts
+        .filter((contract) => contract.status === "resolved")
+        .flatMap((contract) => [...contract.requiredArtifacts, ...contract.acceptanceExpectations]),
+      taskIds: contracts
+        .filter((contract) => contract.status === "resolved")
+        .flatMap((contract) => [contract.sourceTaskId, contract.resolvedByTaskId]),
+      receiptIds: [],
+      contractIds: contracts.filter((contract) => contract.status === "resolved").map((contract) => contract.id),
+      checkIds: [],
+      suggestedAction: null
+    }));
   }
 
-  return buildRoleReport("contract_auditor", approvals, objections);
+  return buildRoleReport("contract_auditor", approvals, objections, evidencePacks);
 }
 
 function buildIntegrationAuditorRole(context: MissionAuditContext): QualityCourtRoleReport {
   const { mission, tasks, receipts, artifacts, overlaps } = context;
   const objections: MissionObjection[] = [];
   const approvals: string[] = [];
+  const evidencePacks: QualityCourtEvidencePack[] = [];
 
   if (overlaps.length > 0) {
     objections.push(buildObjection(mission.id, "integration_auditor", {
@@ -351,6 +530,26 @@ function buildIntegrationAuditorRole(context: MissionAuditContext): QualityCourt
         .map((task) => task.id),
       suggestedAction: "kavi recommend"
     }));
+    evidencePacks.push(buildEvidencePack(mission.id, "integration_auditor", {
+      stance: "objection",
+      severity: "critical",
+      kind: "integration_overlap",
+      title: "Overlapping path claims need integration",
+      summary: "Multiple mission tasks still converge on the same path surface.",
+      highlights: overlaps,
+      evidence: overlaps,
+      taskIds: tasks
+        .filter((task) =>
+          task.claimedPaths.some((claim) =>
+            overlaps.some((item) => claim === item || claim.startsWith(`${item}/`) || item.startsWith(`${claim}/`))
+          )
+        )
+        .map((task) => task.id),
+      receiptIds: [],
+      contractIds: [],
+      checkIds: [],
+      suggestedAction: "kavi recommend"
+    }));
   }
 
   const completedReceipts = receipts.filter((receipt) => receipt.outcome === "completed");
@@ -364,10 +563,27 @@ function buildIntegrationAuditorRole(context: MissionAuditContext): QualityCourt
       likelyTaskIds: tasks.map((task) => task.id),
       suggestedAction: "kavi receipts latest"
     }));
+    evidencePacks.push(buildEvidencePack(mission.id, "integration_auditor", {
+      stance: "objection",
+      severity: "major",
+      kind: "receipt_surface",
+      title: "No completed mission receipts are available",
+      summary: "The mission does not yet have a completed proof-of-work receipt tying changes to task outcomes.",
+      highlights: tasks.map((task) => `${task.owner}:${task.title}`),
+      evidence: tasks.flatMap((task) => task.claimedPaths),
+      taskIds: tasks.map((task) => task.id),
+      receiptIds: [],
+      contractIds: [],
+      checkIds: [],
+      suggestedAction: "kavi receipts latest"
+    }));
   }
 
   const failedTasks = tasks.filter((task) => task.status === "failed");
   for (const task of failedTasks.slice(0, 3)) {
+    const taskArtifactSummaries = artifacts
+      .filter((artifact) => artifact.taskId === task.id)
+      .flatMap((artifact) => [artifact.error ?? "", artifact.summary ?? ""]);
     objections.push(buildObjection(mission.id, "integration_auditor", {
       severity: "critical",
       kind: "receipt",
@@ -375,11 +591,23 @@ function buildIntegrationAuditorRole(context: MissionAuditContext): QualityCourt
       detail: task.lastFailureSummary ?? "This task failed and still needs attention.",
       evidence: unique([
         ...task.claimedPaths,
-        ...artifacts
-          .filter((artifact) => artifact.taskId === task.id)
-          .flatMap((artifact) => [artifact.error ?? "", artifact.summary ?? ""])
+        ...taskArtifactSummaries
       ]),
       likelyTaskIds: [task.id],
+      suggestedAction: `kavi retry ${task.id}`
+    }));
+    evidencePacks.push(buildEvidencePack(mission.id, "integration_auditor", {
+      stance: "objection",
+      severity: "critical",
+      kind: "failed_task_surface",
+      title: task.title,
+      summary: task.lastFailureSummary ?? "This task failed and still needs attention.",
+      highlights: task.claimedPaths,
+      evidence: [...task.claimedPaths, ...taskArtifactSummaries],
+      taskIds: [task.id],
+      receiptIds: receipts.filter((receipt) => receipt.taskId === task.id).map((receipt) => receipt.id),
+      contractIds: [],
+      checkIds: [],
       suggestedAction: `kavi retry ${task.id}`
     }));
   }
@@ -389,18 +617,33 @@ function buildIntegrationAuditorRole(context: MissionAuditContext): QualityCourt
   }
   if (completedReceipts.length > 0) {
     approvals.push(`${completedReceipts.length} completed mission receipt(s) are available.`);
+    evidencePacks.push(buildEvidencePack(mission.id, "integration_auditor", {
+      stance: "approval",
+      severity: null,
+      kind: "receipt_surface",
+      title: "Completed mission receipts are available",
+      summary: "The mission has completed receipts tying work to concrete changed surfaces and evidence.",
+      highlights: completedReceipts.map((receipt) => receipt.title).slice(0, 6),
+      evidence: completedReceipts.flatMap((receipt) => receipt.changedPaths),
+      taskIds: completedReceipts.map((receipt) => receipt.taskId),
+      receiptIds: completedReceipts.map((receipt) => receipt.id),
+      contractIds: [],
+      checkIds: [],
+      suggestedAction: null
+    }));
   }
   if (failedTasks.length === 0) {
     approvals.push("No failed mission tasks are waiting for integration recovery.");
   }
 
-  return buildRoleReport("integration_auditor", approvals, objections);
+  return buildRoleReport("integration_auditor", approvals, objections, evidencePacks);
 }
 
 function buildRiskAuditorRole(context: MissionAuditContext): QualityCourtRoleReport {
   const { mission } = context;
   const objections: MissionObjection[] = [];
   const approvals: string[] = [];
+  const evidencePacks: QualityCourtEvidencePack[] = [];
   const drift = buildMissionDriftReport(context.session, context.artifacts, mission);
 
   const highRisks = (mission.risks ?? []).filter((risk) => risk.severity === "high");
@@ -412,6 +655,20 @@ function buildRiskAuditorRole(context: MissionAuditContext): QualityCourtRoleRep
       detail: risk.detail,
       evidence: [risk.mitigation],
       likelyTaskIds: [],
+      suggestedAction: null
+    }));
+    evidencePacks.push(buildEvidencePack(mission.id, "risk_auditor", {
+      stance: "objection",
+      severity: "minor",
+      kind: "risk_register",
+      title: risk.title,
+      summary: risk.detail,
+      highlights: [risk.mitigation],
+      evidence: [risk.mitigation],
+      taskIds: [],
+      receiptIds: [],
+      contractIds: [],
+      checkIds: [],
       suggestedAction: null
     }));
   }
@@ -430,6 +687,20 @@ function buildRiskAuditorRole(context: MissionAuditContext): QualityCourtRoleRep
         likelyTaskIds: [],
         suggestedAction: "kavi mission simulate latest"
       }));
+      evidencePacks.push(buildEvidencePack(mission.id, "risk_auditor", {
+        stance: "objection",
+        severity: "minor",
+        kind: "simulation_risk",
+        title: issue.title,
+        summary: issue.detail,
+        highlights: [],
+        evidence: [],
+        taskIds: [],
+        receiptIds: [],
+        contractIds: [],
+        checkIds: [],
+        suggestedAction: "kavi mission simulate latest"
+      }));
     }
   }
 
@@ -443,6 +714,20 @@ function buildRiskAuditorRole(context: MissionAuditContext): QualityCourtRoleRep
       likelyTaskIds: item.likelyTaskIds,
       suggestedAction: item.suggestedAction
     }));
+    evidencePacks.push(buildEvidencePack(mission.id, "risk_auditor", {
+      stance: "objection",
+      severity: item.status === "missing" ? "major" : "minor",
+      kind: "mission_drift",
+      title: item.title,
+      summary: `${item.detail} Current coverage is ${item.status}.`,
+      highlights: item.evidence,
+      evidence: item.evidence,
+      taskIds: item.likelyTaskIds,
+      receiptIds: [],
+      contractIds: [],
+      checkIds: [],
+      suggestedAction: item.suggestedAction
+    }));
   }
 
   if (highRisks.length === 0) {
@@ -453,9 +738,23 @@ function buildRiskAuditorRole(context: MissionAuditContext): QualityCourtRoleRep
   }
   if ((drift?.missingCount ?? 0) === 0) {
     approvals.push("No mission spec or blueprint coverage gaps are currently missing evidence.");
+    evidencePacks.push(buildEvidencePack(mission.id, "risk_auditor", {
+      stance: "approval",
+      severity: null,
+      kind: "mission_drift",
+      title: "Mission spec coverage has no missing gaps",
+      summary: "Drift analysis found no missing coverage across the current mission specification.",
+      highlights: [],
+      evidence: drift?.items.filter((item) => item.status === "covered").map((item) => item.title).slice(0, 6) ?? [],
+      taskIds: [],
+      receiptIds: [],
+      contractIds: [],
+      checkIds: [],
+      suggestedAction: null
+    }));
   }
 
-  return buildRoleReport("risk_auditor", approvals, objections);
+  return buildRoleReport("risk_auditor", approvals, objections, evidencePacks);
 }
 
 export function buildQualityCourtRoleReports(
@@ -525,6 +824,7 @@ export function buildMissionAuditReport(
     approvals,
     objections,
     roleReports,
+    evidencePacks: roleReports.flatMap((report) => report.evidencePacks),
     dominantRoles,
     receiptsReviewed: context.receipts.length,
     checksReviewed: mission.acceptance.checks.length,

@@ -1140,6 +1140,37 @@ export type QualityCourtRole =
   | "integration_auditor"
   | "risk_auditor";
 
+export type QualityCourtEvidencePackKind =
+  | "acceptance_failure"
+  | "verification_gap"
+  | "verification_receipts"
+  | "contract_chain"
+  | "follow_up_queue"
+  | "integration_overlap"
+  | "failed_task_surface"
+  | "receipt_surface"
+  | "risk_register"
+  | "simulation_risk"
+  | "mission_drift";
+
+export interface QualityCourtEvidencePack {
+  id: string;
+  missionId: string;
+  role: QualityCourtRole;
+  stance: "approval" | "objection";
+  severity: MissionObjection["severity"] | null;
+  kind: QualityCourtEvidencePackKind;
+  title: string;
+  summary: string;
+  highlights: string[];
+  evidence: string[];
+  taskIds: string[];
+  receiptIds: string[];
+  contractIds: string[];
+  checkIds: string[];
+  suggestedAction: string | null;
+}
+
 export interface MissionObjection {
   id: string;
   missionId: string;
@@ -1169,6 +1200,7 @@ export interface QualityCourtRoleReport {
   summary: string;
   approvals: string[];
   objections: MissionObjection[];
+  evidencePacks: QualityCourtEvidencePack[];
 }
 
 export interface MissionAuditReport {
@@ -1179,6 +1211,7 @@ export interface MissionAuditReport {
   approvals: string[];
   objections: MissionObjection[];
   roleReports: QualityCourtRoleReport[];
+  evidencePacks: QualityCourtEvidencePack[];
   dominantRoles: QualityCourtRole[];
   receiptsReviewed: number;
   checksReviewed: number;

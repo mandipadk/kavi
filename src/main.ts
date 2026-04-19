@@ -3656,7 +3656,17 @@ async function commandJudgeFamily(cwd: string, args: string[], mode: "judge" | "
     return;
   }
 
-  const renderRoleReport = (label: string, report: { verdict: string; score: number; summary: string; approvals: string[]; objections: typeof audit.objections; }) => {
+  const renderRoleReport = (
+    label: string,
+    report: {
+      verdict: string;
+      score: number;
+      summary: string;
+      approvals: string[];
+      objections: typeof audit.objections;
+      evidencePacks: typeof audit.evidencePacks;
+    }
+  ) => {
     console.log(`${label}`);
     console.log(`Verdict: ${report.verdict} | score=${report.score}`);
     console.log(`Summary: ${report.summary}`);
@@ -3681,6 +3691,32 @@ async function commandJudgeFamily(cwd: string, args: string[], mode: "judge" | "
     if (report.objections.length === 0) {
       console.log("- none");
     }
+    console.log("Evidence Packs:");
+    for (const pack of report.evidencePacks) {
+      console.log(`- [${pack.stance}${pack.severity ? `/${pack.severity}` : ""}/${pack.kind}] ${pack.title}`);
+      console.log(`  ${pack.summary}`);
+      if (pack.highlights.length > 0) {
+        console.log(`  highlights: ${pack.highlights.join(" | ")}`);
+      }
+      if (pack.evidence.length > 0) {
+        console.log(`  evidence: ${pack.evidence.join(" | ")}`);
+      }
+      const links = [
+        pack.taskIds.length > 0 ? `tasks=${pack.taskIds.join(",")}` : "",
+        pack.receiptIds.length > 0 ? `receipts=${pack.receiptIds.join(",")}` : "",
+        pack.contractIds.length > 0 ? `contracts=${pack.contractIds.join(",")}` : "",
+        pack.checkIds.length > 0 ? `checks=${pack.checkIds.join(",")}` : ""
+      ].filter(Boolean);
+      if (links.length > 0) {
+        console.log(`  links: ${links.join(" | ")}`);
+      }
+      if (pack.suggestedAction) {
+        console.log(`  action: ${pack.suggestedAction}`);
+      }
+    }
+    if (report.evidencePacks.length === 0) {
+      console.log("- none");
+    }
   };
 
   if (role && selectedRoleReport) {
@@ -3695,7 +3731,7 @@ async function commandJudgeFamily(cwd: string, args: string[], mode: "judge" | "
   if (audit.roleReports.length > 0) {
     console.log("Role breakdown:");
     for (const report of audit.roleReports) {
-      console.log(`- ${report.role} | verdict=${report.verdict} | score=${report.score}`);
+      console.log(`- ${report.role} | verdict=${report.verdict} | score=${report.score} | evidence=${report.evidencePacks.length}`);
       if (report.objections[0]) {
         console.log(`  top objection: ${report.objections[0].title}`);
       }
