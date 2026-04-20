@@ -526,6 +526,7 @@ test("daemon exposes operator state and control over the Unix socket", async (t)
       await saveSessionRecord(paths, retrySession);
     }
     await rpcNotifyExternalUpdate(paths, "test.retry_seeded");
+    await waitFor(async () => pushedReasons.includes("test.retry_seeded"));
     await waitFor(async () => {
       const snapshot = await readSnapshot(paths);
       return snapshot.session.tasks.some((task) => task.id === "task-failed");

@@ -109,12 +109,15 @@ function buildPublishedPackageJson(packageJson, version) {
   return published;
 }
 
-async function run(command, args, cwd) {
+async function run(command, args, cwd, options = {}) {
   await new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       cwd,
       stdio: "inherit",
-      env: process.env
+      env: {
+        ...process.env,
+        ...(options.env ?? {})
+      }
     });
 
     child.on("error", reject);
@@ -134,12 +137,15 @@ async function run(command, args, cwd) {
   });
 }
 
-async function runCapture(command, args, cwd) {
+async function runCapture(command, args, cwd, options = {}) {
   return await new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       cwd,
       stdio: ["ignore", "pipe", "pipe"],
-      env: process.env
+      env: {
+        ...process.env,
+        ...(options.env ?? {})
+      }
     });
 
     let stdout = "";
@@ -319,7 +325,11 @@ async function main() {
       publishArgs.push("--tag", tag);
     }
 
-    await run("npm", publishArgs, repoRoot);
+    await run("npm", publishArgs, repoRoot, {
+      env: {
+        KAVI_SKIP_PREPUBLISH_CHECK: "1"
+      }
+    });
   } finally {
     await fs.writeFile(packageFile, `${JSON.stringify(restoredPackageJson, null, 2)}\n`, "utf8");
   }

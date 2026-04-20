@@ -144,6 +144,59 @@ export interface DoctorCheck {
   detail: string;
 }
 
+export type ReadinessFindingStatus = "pass" | "warn" | "fail";
+export type ReadinessAreaId =
+  | "environment"
+  | "guidance"
+  | "verification"
+  | "evidence"
+  | "memory"
+  | "autonomy";
+export type ReadinessLevel =
+  | "bootstrap"
+  | "operational"
+  | "guided"
+  | "autonomous"
+  | "compounding";
+
+export interface ReadinessFinding {
+  id: string;
+  area: ReadinessAreaId;
+  title: string;
+  status: ReadinessFindingStatus;
+  score: number;
+  maxScore: number;
+  detail: string;
+  evidence: string[];
+  suggestedAction: string | null;
+}
+
+export interface ReadinessAreaReport {
+  id: ReadinessAreaId;
+  title: string;
+  score: number;
+  maxScore: number;
+  status: ReadinessFindingStatus;
+  summary: string;
+  findings: ReadinessFinding[];
+}
+
+export interface ReadinessReport {
+  repoRoot: string;
+  generatedAt: string;
+  level: ReadinessLevel;
+  score: number;
+  maxScore: number;
+  summary: string;
+  latestMissionId: string | null;
+  areas: ReadinessAreaReport[];
+  topActions: Array<{
+    title: string;
+    detail: string;
+    command: string | null;
+  }>;
+}
+
 export interface WorktreeInfo {
   agent: AgentName;
   path: string;

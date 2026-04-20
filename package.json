@@ -1,6 +1,6 @@
 {
   "name": "@mandipadk7/kavi",
-  "version": "1.5.1",
+  "version": "1.5.2",
   "description": "Managed Codex + Claude collaboration TUI",
   "type": "module",
   "preferGlobal": true,
@@ -15,7 +15,9 @@
   "publishConfig": {
     "access": "public"
   },
-  "bin": "bin/kavi.js",
+  "bin": {
+    "kavi": "bin/kavi.js"
+  },
   "files": [
     "bin",
     "dist",
@@ -48,7 +50,7 @@
     "release:check": "npm run build && npm test && npm pack --dry-run --cache /tmp/kavi-npm-cache",
     "publish:beta": "node ./scripts/publish.mjs --tag beta",
     "publish:latest": "node ./scripts/publish.mjs --tag latest",
-    "prepublishOnly": "npm run release:check"
+    "prepublishOnly": "node ./scripts/prepublish-check.mjs"
   },
   "engines": {
     "node": ">=25.0.0"

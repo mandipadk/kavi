@@ -88,6 +88,7 @@ import { buildMissionPlayback, filterMissionPlayback } from "./playback.ts";
 import { currentExecutionPlan, decidePlanningMode } from "./planning.ts";
 import { isProcessAlive, runCommand, runInteractiveCommand, spawnDetachedNode } from "./process.ts";
 import { parseClaudeHookEvent } from "./provider-runtime.ts";
+import { buildRepoReadinessReport } from "./readiness.ts";
 import { loadLatestLandReport } from "./reports.ts";
 import {
   pingRpc,
@@ -478,6 +479,7 @@ function renderUsage(): string {
     "  kavi version",
     "  kavi init [--home] [--no-commit]",
     "  kavi doctor [--json]",
+    "  kavi readiness [--json]",
     "  kavi update [--check] [--dry-run] [--yes] [--tag latest|beta] [--version X.Y.Z]",
     "  kavi start [--goal \"...\"] [--approve-all]",
     "  kavi open [--goal \"...\"] [--approve-all]",
@@ -728,6 +730,52 @@ async function commandDoctor(cwd: string, args: string[]): Promise<void> {
   }
 
   process.exitCode = failed ? 1 : 0;
+}
+
+async function commandReadiness(cwd: string, args: string[]): Promise<void> {
+  const prepared = await prepareProjectContext(cwd, {
+    createRepository: false,
+    ensureHeadCommit: false,
+    ensureHomeConfig: false
+  });
+  const report = await buildRepoReadinessReport(prepared.repoRoot, prepared.paths);
+
+  if (args.includes("--json")) {
+    console.log(JSON.stringify(report, null, 2));
+    process.exitCode = report.level === "bootstrap" ? 1 : 0;
+    return;
+  }
+
+  console.log(`${report.level.toUpperCase()} ${report.score}/${report.maxScore}`);
+  console.log(report.summary);
+  console.log("");
+  for (const area of report.areas) {
+    const prefix = area.status === "pass" ? "OK" : area.status === "warn" ? "WARN" : "FAIL";
+    console.log(`${prefix} ${area.title}: ${area.score}/${area.maxScore}`);
+    console.log(`  ${area.summary}`);
+    for (const item of area.findings) {
+      console.log(`  - ${item.status.toUpperCase()} ${item.title}: ${item.detail}`);
+      if (item.evidence.length > 0) {
+        console.log(`    evidence: ${item.evidence.join(" | ")}`);
+      }
+      if (item.suggestedAction) {
+        console.log(`    action: ${item.suggestedAction}`);
+      }
+    }
+    console.log("");
+  }
+
+  if (report.topActions.length > 0) {
+    console.log("Top Actions");
+    for (const action of report.topActions) {
+      console.log(`- ${action.title}: ${action.detail}`);
+      if (action.command) {
+        console.log(`  ${action.command}`);
+      }
+    }
+  }
+
+  process.exitCode = report.level === "bootstrap" ? 1 : 0;
 }
 
 async function commandUpdate(cwd: string, args: string[]): Promise<void> {
@@ -6312,6 +6360,9 @@ async function main(): Promise<void> {
       break;
     case "doctor":
       await commandDoctor(cwd, args);
+      break;
+    case "readiness":
+      await commandReadiness(cwd, args);
       break;
     case "update":
       await commandUpdate(cwd, args);
